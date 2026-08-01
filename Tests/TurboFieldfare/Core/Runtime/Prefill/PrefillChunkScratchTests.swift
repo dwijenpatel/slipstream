@@ -32,7 +32,9 @@ import Metal
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
         #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 0).chunkTokens == 1)
-        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 512).chunkTokens == 128)
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 512).chunkTokens == 512)
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 8192).chunkTokens
+                == PrefillRuntimeConfig.maxChunkTokens)
     }
 
     @Test func allocationUsesPrivateScratchAndSharedRouteMetadata() throws {
