@@ -105,4 +105,37 @@ import Testing
             ])
         }
     }
+
+    @Test func prefillChunkDefaultsToProduction128() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(arguments.prefillChunk == .fixed(128))
+    }
+
+    @Test(arguments: [32, 64, 128, 256, 512, 1024, 2048, 4096])
+    func prefillChunkAcceptsAllowedSizes(size: Int) throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--prefill-chunk", String(size),
+        ])
+        #expect(arguments.prefillChunk == .fixed(size))
+    }
+
+    @Test func prefillChunkAcceptsAuto() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--prefill-chunk", "auto",
+        ])
+        #expect(arguments.prefillChunk == .auto)
+    }
+
+    @Test(arguments: ["0", "100", "8192", "-128", "big"])
+    func prefillChunkRejectsDisallowedValues(value: String) {
+        #expect(throws: ArgsError.invalidValue(flag: "--prefill-chunk",
+                                               value: value)) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--prefill-chunk", value,
+            ])
+        }
+    }
 }

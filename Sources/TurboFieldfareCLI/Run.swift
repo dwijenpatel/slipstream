@@ -53,9 +53,22 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        let prefillChunkTokens: Int
+        switch args.prefillChunk {
+        case .fixed(let n):
+            prefillChunkTokens = n
+        case .auto:
+            // Smallest allowed chunk that covers the prompt: one chunk per
+            // prompt when it fits, which reads each layer's routed experts
+            // exactly once during prefill.
+            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+                .first(where: { $0 >= promptIds.count })
+                ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
+        }
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
+            prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy)
 
         guard MTLCreateSystemDefaultDevice() != nil else {

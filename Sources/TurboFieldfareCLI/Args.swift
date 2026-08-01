@@ -1,3 +1,14 @@
+import TurboFieldfare
+
+/// Prefill chunk selection. `.fixed` must name an allowed size;
+/// `.auto` resolves to the smallest allowed size covering the prompt,
+/// which minimizes routed-expert re-reads (expert I/O scales with
+/// prompt_tokens / chunk_tokens).
+public enum PrefillChunkChoice: Equatable, Sendable {
+    case fixed(Int)
+    case auto
+}
+
 public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
@@ -13,6 +24,7 @@ public struct Args: Equatable, Sendable {
     public var quiet: Bool
     public var expertCacheSlots: Int
     public var rdadvise: String
+    public var prefillChunk: PrefillChunkChoice
 
     public init(model: String,
                 prompt: String? = nil,
@@ -27,7 +39,8 @@ public struct Args: Equatable, Sendable {
                 stops: [String] = [],
                 quiet: Bool = false,
                 expertCacheSlots: Int = 16,
-                rdadvise: String = "off") {
+                rdadvise: String = "off",
+                prefillChunk: PrefillChunkChoice = .fixed(128)) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -42,6 +55,7 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
+        self.prefillChunk = prefillChunk
     }
 }
 
@@ -92,6 +106,11 @@ extension Args {
       --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
                                 24, or 32 (default 16). More slots raise the
                                 hit rate but use more memory.
+      --prefill-chunk <n|auto>  Prefill chunk tokens (default 128). Larger
+                                chunks cut routed-expert re-reads during
+                                prompt processing; auto sizes the chunk to
+                                the prompt. Allowed: 32, 64, 128, 256, 512,
+                                1024, 2048, 4096.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -111,6 +130,7 @@ extension Args {
         var quiet = false
         var expertCacheSlots = 16
         var rdadvise = "off"
+        var prefillChunk = PrefillChunkChoice.fixed(128)
 
         var index = 0
         while index < argv.count {
@@ -118,6 +138,17 @@ extension Args {
             switch flag {
             case "--help":
                 throw ArgsError.helpRequested
+            case "--prefill-chunk":
+                let value = try takeValue(argv, &index, flag: flag)
+                if value == "auto" {
+                    prefillChunk = .auto
+                } else if let parsed = Int(value),
+                          RuntimeConfiguration.allowedPrefillChunkTokens
+                              .contains(parsed) {
+                    prefillChunk = .fixed(parsed)
+                } else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
             case "--quiet":
                 quiet = true
                 index += 1
@@ -212,7 +243,8 @@ extension Args {
                     stops: stops,
                     quiet: quiet,
                     expertCacheSlots: expertCacheSlots,
-                    rdadvise: rdadvise)
+                    rdadvise: rdadvise,
+                    prefillChunk: prefillChunk)
     }
 
     private static func takeValue(_ argv: [String],
