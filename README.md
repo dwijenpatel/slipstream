@@ -55,10 +55,12 @@ with context. That measurement, not intuition, sets the roadmap below.
    irreducible ~207 us waitUntilCompleted round trips (router
    readback); a GPU-fence spin bypass is bit-identical but slower.
    The wait cannot shrink; work must overlap into it.
-3. Expert prefetch overlap: prefetch next layers' experts (previous
-   token routing, 85-95 percent next-layer recall in literature)
-   DURING the cb1 wait; hides the 7.8 ms/token I/O await inside the
-   11.8 s/512-token wait wall
+3. BUILT + measured 2026-08-01: predicted routing (layer L+1 router
+   on layer L state) = 81.9 percent recall@top-8; env-gated prefetch
+   cuts I/O await 55 percent but is NET SLOWER on resident-class
+   models (bandwidth-saturated unified memory re-collects the bytes).
+   Default off; re-test in the streaming regime (model >> RAM) where
+   the GPU is genuinely idle during disk waits
 4. KV block persistence on SSD (returning conversations skip prefill;
    oMLX blueprint, including its non-sliceable-state mechanisms; first
    commit is the reload-vs-recompute benchmark)
