@@ -526,6 +526,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // gpuStartTime/gpuEndTime. CPU-side encode counters above cannot
     // attribute the wait time; these can.
     public private(set) var totalCb1GpuNanos: UInt64 = 0
+    /// Diagnostic: when true, cb1 is split at the attention/tail boundary
+    /// so GPU time can be attributed to the attention branch per layer
+    /// type vs the norms+router tail. Adds one extra command buffer per
+    /// layer per token; off by default.
+    public var splitCb1Phases = false
+    public private(set) var totalCb1LinearAttnGpuNanos: UInt64 = 0
+    public private(set) var totalCb1FullAttnGpuNanos: UInt64 = 0
+    public private(set) var totalCb1TailGpuNanos: UInt64 = 0
     public private(set) var totalCb2GpuNanos: UInt64 = 0
     public private(set) var totalHeadGpuNanos: UInt64 = 0
     public private(set) var totalCb1Nanos: UInt64 = 0
@@ -1728,7 +1736,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Everything up to and including the router runs in a single CB:
             // the only reason to break is the CPU readback of router indices
             // needed to issue I/O for the routed-expert blobs.
-            let cb = ctx.queue.makeCommandBuffer()!
+            var cb = ctx.queue.makeCommandBuffer()!
+            var cb1AttnCB: MTLCommandBuffer?
             rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
                             weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
@@ -1835,6 +1844,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             x: attnOut, y: oOut, m: D, n: qDim)
             }
 
+            if splitCb1Phases {
+                // End the attention-branch buffer here; the same serial
+                // queue keeps ordering, and the split lets gpuStart/End
+                // attribute attention vs tail separately.
+                cb.commit()
+                cb1AttnCB = cb
+                cb = ctx.queue.makeCommandBuffer()!
+            }
+
             if cfg.ffnSandwichNorms {
                 let preFFN   = try model.preFFN(layer: L)
                 let preFFN2  = try model.preFFN2(layer: L)
@@ -1888,6 +1906,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
             totalCb1GpuNanos &+= Self.gpuNanos(cb)
+            if let attnCB = cb1AttnCB {
+                totalCb1GpuNanos &+= Self.gpuNanos(attnCB)
+                if isLinear {
+                    totalCb1LinearAttnGpuNanos &+= Self.gpuNanos(attnCB)
+                } else {
+                    totalCb1FullAttnGpuNanos &+= Self.gpuNanos(attnCB)
+                }
+                totalCb1TailGpuNanos &+= Self.gpuNanos(cb)
+            }
 
             // CPU readback to fetch routed-expert blobs from disk.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,

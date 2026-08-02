@@ -86,6 +86,9 @@ public func run(args: Args,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_CB1_SPLIT"] == "1" {
+            runner.splitCb1Phases = true
+        }
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -122,6 +125,11 @@ public func run(args: Args,
             lines += "  gpu cb1 (attn+norms+router): " + ms(runner.totalCb1GpuNanos) + " ms\n"
             lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
             lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
+            if runner.splitCb1Phases {
+                lines += "  gpu cb1/attn linear (GDN):   " + ms(runner.totalCb1LinearAttnGpuNanos) + " ms\n"
+                lines += "  gpu cb1/attn full:           " + ms(runner.totalCb1FullAttnGpuNanos) + " ms\n"
+                lines += "  gpu cb1/tail (norms+router): " + ms(runner.totalCb1TailGpuNanos) + " ms\n"
+            }
             stderr.write(Data(lines.utf8))
         }
         if !args.quiet {
