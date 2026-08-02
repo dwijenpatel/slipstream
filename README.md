@@ -61,9 +61,12 @@ with context. That measurement, not intuition, sets the roadmap below.
    models (bandwidth-saturated unified memory re-collects the bytes).
    Default off; re-test in the streaming regime (model >> RAM) where
    the GPU is genuinely idle during disk waits
-4. KV block persistence on SSD (returning conversations skip prefill;
-   oMLX blueprint, including its non-sliceable-state mechanisms; first
-   commit is the reload-vs-recompute benchmark)
+4. SHIPPED v1 2026-08-01: --kv-snapshot exact-prefix resume. Reload
+   beats recompute 588x on prefill (17.65 s -> 0.03 s, byte-identical,
+   119 MB @3k tokens). Found tradeoff: prefill doubled as the expert
+   cache warmer, so post-restore decode ramps from cold; background
+   expert sweep after restore is the queued mitigation. Partial-prefix
+   block reuse (the oMLX-blueprint hard part) remains open.
 5. Memory-budget dial: one flag that sets expert-cache slots, prefill
    chunk, and KV policy together
 6. Playbook automation until a new model is days, not weeks
