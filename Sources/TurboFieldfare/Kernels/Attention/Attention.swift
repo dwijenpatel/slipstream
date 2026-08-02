@@ -8,6 +8,7 @@ struct AttentionSplitGeometry: Sendable, Equatable {
     let chunkLength: Int
     let partialThreadgroups: Int
     let useSWAGroupedPartial: Bool
+    var useFullGroupedPartial: Bool = false
 }
 
 
@@ -37,6 +38,11 @@ final class Attention {
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
+    private let psoGQAFullGeneric: MTLComputePipelineState
+    private let psoGQAFull256: MTLComputePipelineState
+    private let psoGQAFull512: MTLComputePipelineState
+    private let psoGQAFull256Chunks16: MTLComputePipelineState
+    private let psoGQAFull512Chunks16: MTLComputePipelineState
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
     /// with a hardcoded 256-thread group so its threadgroup-memory scratch
@@ -64,6 +70,31 @@ final class Attention {
         self.ctx = context
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
+        self.psoGQAFullGeneric = try context.pipeline("attention_decode_gqa_full_partial")
+        // Both supported models' full-attention layers are 16 Q : 2 KV heads;
+        // Qwen3.6 at head dim 256, Gemma 4 at 512.
+        self.psoGQAFull256 = try Self.specializedPipeline(context,
+                                                          "attention_decode_gqa_full_partial",
+                                                          headDim: 256,
+                                                          numQHeads: 16,
+                                                          numKVHeads: 2)
+        self.psoGQAFull512 = try Self.specializedPipeline(context,
+                                                          "attention_decode_gqa_full_partial",
+                                                          headDim: 512,
+                                                          numQHeads: 16,
+                                                          numKVHeads: 2)
+        self.psoGQAFull256Chunks16 = try Self.specializedPipeline(context,
+                                                                  "attention_decode_gqa_full_partial",
+                                                                  headDim: 256,
+                                                                  numQHeads: 16,
+                                                                  numKVHeads: 2,
+                                                                  numChunks: 16)
+        self.psoGQAFull512Chunks16 = try Self.specializedPipeline(context,
+                                                                  "attention_decode_gqa_full_partial",
+                                                                  headDim: 512,
+                                                                  numQHeads: 16,
+                                                                  numKVHeads: 2,
+                                                                  numChunks: 16)
         self.psoCombine = try context.pipeline("attention_decode_combine")
         self.psoPartialSWA = try Self.specializedPipeline(context,
                                                           "attention_decode_partial",
@@ -141,19 +172,28 @@ final class Attention {
                                      preferGQASWA: Bool) -> AttentionSplitGeometry {
         let qPerKV = Int(numQHeads / numKVHeads)
         let useSWAGQAPartial = preferGQASWA && qPerKV <= 2
+        // Full attention groups all q_per_kv heads that share a KV head into
+        // one threadgroup (one simdgroup per head), so each KV row is read
+        // once instead of q_per_kv times. Grouping drops threadgroup count
+        // from NQ*NC to NKV*NC, so the chunk count scales up by q_per_kv
+        // (capped) to keep the GPU occupied.
+        let useFullGQAPartial = !preferGQASWA && qPerKV >= 2 && qPerKV <= 8
+        let grouped = useSWAGQAPartial || useFullGQAPartial
         let effectiveLength = Int(seqLen) - Int(kvStart)
         let baseChunks = Self.chunkCount(effLen: effectiveLength,
                                          preferGQASWA: useSWAGQAPartial)
-        let numChunks = useSWAGQAPartial
+        let numChunks = grouped
             ? max(baseChunks, min(Self.maxChunks, baseChunks * qPerKV))
             : baseChunks
         let chunkLength = (max(1, effectiveLength) + numChunks - 1) / numChunks
-        let partialHeadGroups = useSWAGQAPartial ? Int(numKVHeads) : Int(numQHeads)
-        return AttentionSplitGeometry(effectiveLength: effectiveLength,
+        let partialHeadGroups = grouped ? Int(numKVHeads) : Int(numQHeads)
+        var geometry = AttentionSplitGeometry(effectiveLength: effectiveLength,
                                       numChunks: numChunks,
                                       chunkLength: chunkLength,
                                       partialThreadgroups: partialHeadGroups * numChunks,
                                       useSWAGroupedPartial: useSWAGQAPartial)
+        geometry.useFullGroupedPartial = useFullGQAPartial
+        return geometry
     }
 
 
@@ -253,6 +293,7 @@ final class Attention {
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
+                                         useFullGQAPartial: geometry.useFullGroupedPartial,
                                          ringCapacity: ringCapacity)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
@@ -333,7 +374,19 @@ final class Attention {
                                  numKVHeads: UInt32,
                                  numChunks: Int,
                                  useGQAPartial: Bool,
+                                 useFullGQAPartial: Bool = false,
                                  ringCapacity: UInt32 = 0) -> MTLComputePipelineState {
+        if useFullGQAPartial && ringCapacity == 0 {
+            if numQHeads == 16 && numKVHeads == 2 {
+                if headDim == 256 {
+                    return numChunks == 16 ? psoGQAFull256Chunks16 : psoGQAFull256
+                }
+                if headDim == 512 {
+                    return numChunks == 16 ? psoGQAFull512Chunks16 : psoGQAFull512
+                }
+            }
+            return psoGQAFullGeneric
+        }
         if ringCapacity > 0 {
             let name = useGQAPartial ? "attention_decode_gqa_swa_partial" : "attention_decode_partial"
             let specializedChunks = numChunks == 16 ? Optional(UInt32(numChunks)) : nil

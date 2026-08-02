@@ -40,10 +40,14 @@ import TurboFieldfareValidationSupport
                                            kvStart: 0,
                                            preferGQASWA: false)
         #expect(full.effectiveLength == 1536)
-        #expect(full.numChunks == 16)
-        #expect(full.chunkLength == 96)
-        #expect(full.partialThreadgroups == 256)
+        // Full attention is GQA-grouped: threadgroups = numKVHeads x chunks
+        // (each KV row read once for all 8 sharing Q heads), with the chunk
+        // count scaled up by q_per_kv to keep occupancy.
+        #expect(full.numChunks == 64)
+        #expect(full.chunkLength == 24)
+        #expect(full.partialThreadgroups == 128)
         #expect(!full.useSWAGroupedPartial)
+        #expect(full.useFullGroupedPartial)
     }
 
     // MARK: - Gemma 4 scale=1.0 path
