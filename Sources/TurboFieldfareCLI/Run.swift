@@ -89,6 +89,13 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_CB1_SPLIT"] == "1" {
             runner.splitCb1Phases = true
         }
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE"] == "1" {
+            runner.predictRouting = true
+        }
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PREFETCH"] == "1" {
+            runner.predictRouting = true
+            runner.prefetchExperts = true
+        }
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -126,6 +133,12 @@ public func run(args: Args,
             lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
             lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
             lines += "  cb1 wait wall:               " + ms(runner.totalCb1WaitWallNanos) + " ms\n"
+            if runner.predRouteTotal > 0 {
+                let recall = 100.0 * Double(runner.predRouteHits) / Double(runner.predRouteTotal)
+                lines += "  predicted-route recall@topk: "
+                    + String(format: "%.1f", recall) + "% ("
+                    + String(runner.predRouteHits) + "/" + String(runner.predRouteTotal) + ")\n"
+            }
             if runner.splitCb1Phases {
                 lines += "  gpu cb1/attn linear (GDN):   " + ms(runner.totalCb1LinearAttnGpuNanos) + " ms\n"
                 lines += "  gpu cb1/attn full:           " + ms(runner.totalCb1FullAttnGpuNanos) + " ms\n"

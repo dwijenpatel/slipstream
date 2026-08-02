@@ -202,6 +202,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let zeroResidual: MTLBuffer  // [D] FP16 zeros — for routed branch base
     private let outIndices: MTLBuffer    // [topK] UInt32
     private let outWeights: MTLBuffer    // [topK] FP16
+    // Predicted-routing telemetry (TURBO_FIELDFARE_PRED_ROUTE=1): layer
+    // L+1's router applied to layer L's post-attention state, scored
+    // against L+1's real routing next iteration. Diagnostic only; the
+    // prediction is never used for computation.
+    public var predictRouting = false
+    /// Use the prediction to warm layer L+1's slot cache in the background
+    /// while layer L finishes (fetch overlaps GPU + the irreducible cb1
+    /// wait). Implies predictRouting.
+    public var prefetchExperts = false
+    private var prefetchTask: Task<Void, Never>?
+    public private(set) var prefetchIssued: UInt64 = 0
+    private let predIndices: MTLBuffer   // [topK] UInt32
+    private let predWeights: MTLBuffer   // [topK] FP16
+    private var predPrevExperts: [Int]?  // prediction made at layer L-1 for L
+    public private(set) var predRouteHits: UInt64 = 0
+    public private(set) var predRouteTotal: UInt64 = 0
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
@@ -376,6 +392,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         memset(self.zeroResidual.contents(), 0, self.zeroResidual.length)
         self.outIndices    = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(cfg.topKExperts)
+        self.predIndices   = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
+        self.predWeights   = try buf(cfg.topKExperts)
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize)
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
@@ -1905,6 +1923,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+            if predictRouting, L + 1 < cfg.numLayers {
+                // Layer L+1's router on layer L's post-attention state: the
+                // residual-stream approximation from the prefetch
+                // literature, here measured, not trusted. Rides the
+                // existing cb1 sync; costs one tiny GEMV.
+                let nextRouter = try model.router(layer: L + 1)
+                let nextPES: (buffer: MTLBuffer, offset: Int)
+                if cfg.routerScaled {
+                    let v = try model.routerPerExpertScale(layer: L + 1)
+                    nextPES = (v.buffer, Int(v.offset))
+                } else {
+                    nextPES = (onesPerExpertScale!, 0)
+                }
+                moe.encodeRouterGemma4(commandBuffer: cb,
+                    weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
+                    scales:  nextRouter.buffer, scalesOffset:  Int(nextRouter.scaleOffset),
+                    biases:  nextRouter.buffer, biasesOffset:  Int(nextRouter.biasOffset),
+                    hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
+                    effectiveScale: effectiveScaleBuffers[L + 1],
+                    perExpertScale: nextPES.buffer,
+                    perExpertScaleOffset: nextPES.offset,
+                    outIndices: predIndices, outWeights: predWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+            }
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForCompletion(cb)
@@ -1924,7 +1966,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
+            if predictRouting {
+                if let predicted = predPrevExperts {
+                    let predSet = Set(predicted)
+                    predRouteTotal &+= UInt64(experts.count)
+                    predRouteHits &+= UInt64(experts.filter { predSet.contains($0) }.count)
+                }
+                if L + 1 < cfg.numLayers {
+                    let pPtr = predIndices.contents().bindMemory(to: UInt32.self,
+                                                                 capacity: cfg.topKExperts)
+                    predPrevExperts = (0..<cfg.topKExperts).map {
+                        min(Int(pPtr[$0]), cfg.numExperts - 1)
+                    }
+                    if prefetchExperts, let predicted = predPrevExperts {
+                        let nextLayer = L + 1
+                        let m = model
+                        prefetchIssued &+= 1
+                        prefetchTask = Task.detached(priority: .userInitiated) {
+                            _ = try? await m.fetchRoutedExperts(layer: nextLayer,
+                                                                experts: predicted)
+                        }
+                    }
+                } else {
+                    predPrevExperts = nil
+                }
+            }
 
+            if let t = prefetchTask {
+                // Serialize same-layer streamer access: the warm task for
+                // this layer must land before we plan against its slots.
+                await t.value
+                prefetchTask = nil
+            }
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)
             let canPlanPhase1HitSplit =
