@@ -243,6 +243,31 @@ public final class KVCacheManager {
     /// No buffer zeroing — the attention kernels read only `[0, validTokenCount]`,
     /// and `validTokenCount` is now 0. `MADV_DONTNEED` on the page-aligned span
     /// releases resident memory between turns; pages fault back in on next write.
+    /// Contiguous (K, V) byte ranges for every attention layer up to
+    /// `position`, for whole-state snapshotting. A ring layout equals the
+    /// linear layout until the position exceeds a layer's capacity, so the
+    /// per-layer capacity check below is the wraparound refusal: any layer
+    /// (ring or not) whose slots have wrapped cannot be snapshotted in v1.
+    public func snapshotSections(position: Int) throws -> [(ptr: UnsafeMutableRawPointer, bytes: Int)] {
+        var out: [(UnsafeMutableRawPointer, Int)] = []
+        for layer in 0..<kinds.count where kinds[layer] != .linear {
+            guard position <= capacityTokens[layer] else {
+                throw KVSnapshotError.incompatible(
+                    "position \(position) exceeds layer \(layer) capacity \(capacityTokens[layer])")
+            }
+            let bytes = position * strides[layer]
+            out.append((kBuffers[layer].contents(), bytes))
+            out.append((vBuffers[layer].contents(), bytes))
+        }
+        return out
+    }
+
+    /// Restore entry point paired with `snapshotSections`.
+    public func restorePosition(_ p: Int) {
+        precondition(p >= 0 && p <= maxContext)
+        position = p
+    }
+
     public func reset() {
         position = 0
         let pageSize = Int(getpagesize())

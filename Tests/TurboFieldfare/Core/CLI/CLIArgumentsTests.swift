@@ -66,6 +66,7 @@ import Testing
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk",
+            "--kv-snapshot",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

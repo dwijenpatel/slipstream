@@ -27,6 +27,18 @@ public final class GDNStateManager {
     private static let fp32Size = 4
     private static let fp16Size = 2
 
+    /// (state, conv tail) byte ranges for every linear layer, for
+    /// whole-state snapshotting. GDN state is position-exact by
+    /// construction, so a snapshot taken at position P restores only to P.
+    public func snapshotSections() -> [(ptr: UnsafeMutableRawPointer, bytes: Int)] {
+        var out: [(UnsafeMutableRawPointer, Int)] = []
+        for layer in 0..<config.numLayers where config.layerIsLinear(layer) {
+            out.append((stateBuffers[layer]!.contents(), stateBytesPerLayer))
+            out.append((convTailBuffers[layer]!.contents(), convTailBytesPerLayer))
+        }
+        return out
+    }
+
     public init(device: MTLDevice, config: ArchConfig) throws {
         self.config = config
         let la = config.linearAttention

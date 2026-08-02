@@ -25,6 +25,7 @@ public struct Args: Equatable, Sendable {
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice
+    public var kvSnapshot: String?
 
     public init(model: String,
                 prompt: String? = nil,
@@ -40,7 +41,8 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 expertCacheSlots: Int = 16,
                 rdadvise: String = "off",
-                prefillChunk: PrefillChunkChoice = .fixed(128)) {
+                prefillChunk: PrefillChunkChoice = .fixed(128),
+                kvSnapshot: String? = nil) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -56,6 +58,7 @@ public struct Args: Equatable, Sendable {
         self.stops = stops
         self.quiet = quiet
         self.prefillChunk = prefillChunk
+        self.kvSnapshot = kvSnapshot
     }
 }
 
@@ -111,6 +114,9 @@ extension Args {
                                 prompt processing; auto sizes the chunk to
                                 the prompt. Allowed: 32, 64, 128, 256, 512,
                                 1024, 2048, 4096.
+      --kv-snapshot <path>      Whole-state KV snapshot file: saved after a
+                                fresh prefill, restored (skipping prefill)
+                                when the file matches the exact prompt.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -131,6 +137,7 @@ extension Args {
         var expertCacheSlots = 16
         var rdadvise = "off"
         var prefillChunk = PrefillChunkChoice.fixed(128)
+        var kvSnapshot: String?
 
         var index = 0
         while index < argv.count {
@@ -149,6 +156,12 @@ extension Args {
                 } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+            case "--kv-snapshot":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard !value.isEmpty else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                kvSnapshot = value
             case "--quiet":
                 quiet = true
                 index += 1
@@ -244,7 +257,8 @@ extension Args {
                     quiet: quiet,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
-                    prefillChunk: prefillChunk)
+                    prefillChunk: prefillChunk,
+                    kvSnapshot: kvSnapshot)
     }
 
     private static func takeValue(_ argv: [String],

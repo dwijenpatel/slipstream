@@ -2469,6 +2469,75 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return d > 0 ? UInt64(d * 1_000_000_000) : 0
     }
 
+    /// Whole-state snapshot at `position` (post-prefill, pre-decode).
+    /// Sections: KV per attention layer, then GDN state per linear layer,
+    /// then the seed logits when seedKind == 0.
+    public func saveKVSnapshot(to url: URL,
+                               promptIDs: [Int32],
+                               position: Int,
+                               seed: PrefillSeed,
+                               logits: MTLBuffer) throws {
+        var sections: [(ptr: UnsafeRawPointer, bytes: Int)] = []
+        if let kv {
+            sections += try kv.snapshotSections(position: position)
+                .map { (UnsafeRawPointer($0.ptr), $0.bytes) }
+        }
+        if let gdnState {
+            sections += gdnState.snapshotSections()
+                .map { (UnsafeRawPointer($0.ptr), $0.bytes) }
+        }
+        let seedKind: UInt32
+        let seedToken: UInt32
+        switch seed {
+        case .logitsWritten:
+            seedKind = 0
+            seedToken = 0
+            sections.append((UnsafeRawPointer(logits.contents()),
+                             cfg.vocabSize * MemoryLayout<Float16>.size))
+        case .greedyToken(let t):
+            seedKind = 1
+            seedToken = t
+        }
+        try KVSnapshotFile.write(url: url,
+                                 position: position,
+                                 promptIDs: promptIDs,
+                                 seedKind: seedKind,
+                                 seedToken: seedToken,
+                                 sections: sections)
+    }
+
+    /// Exact-prefix restore. Returns nil when the file is absent; throws on
+    /// an incompatible snapshot. On success the KV cache, GDN state, and
+    /// seed are exactly as the fresh prefill left them.
+    public func restoreKVSnapshot(from url: URL,
+                                  promptIDs: [Int32],
+                                  logits: MTLBuffer) throws -> (position: Int, seed: PrefillSeed)? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        // Probe the header for seed kind by attempting logits layout first,
+        // then greedy. Expected section lengths depend on position, which
+        // the header carries; read it via a two-pass: first with position
+        // from a light header parse.
+        let data = try Data(contentsOf: url)
+        guard data.count >= 40 else { throw KVSnapshotError.incompatible("short file") }
+        let position = Int(data.subdata(in: 8..<16).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+        let seedKind = data.subdata(in: 32..<36).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        var sections: [(ptr: UnsafeMutableRawPointer, bytes: Int)] = []
+        if let kv {
+            sections += try kv.snapshotSections(position: position)
+        }
+        if let gdnState {
+            sections += gdnState.snapshotSections()
+        }
+        if seedKind == 0 {
+            sections.append((logits.contents(),
+                             cfg.vocabSize * MemoryLayout<Float16>.size))
+        }
+        let r = try KVSnapshotFile.read(url: url, promptIDs: promptIDs, sections: sections)
+        kv?.restorePosition(r.position)
+        let seed: PrefillSeed = r.seedKind == 0 ? .logitsWritten : .greedyToken(r.seedToken)
+        return (r.position, seed)
+    }
+
     private func accountCb1(_ d: (cb: MTLCommandBuffer, attnCB: MTLCommandBuffer?, isLinear: Bool)) {
         waitForCompletion(d.cb)
         totalCb1GpuNanos &+= Self.gpuNanos(d.cb)
@@ -2491,3 +2560,5 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
 }
+
+extension RealForwardRunner: KVSnapshotting {}

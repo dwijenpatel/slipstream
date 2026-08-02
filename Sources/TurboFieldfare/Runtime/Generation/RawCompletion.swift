@@ -70,6 +70,15 @@ extension GenerationConfig {
 
 }
 
+/// Producers that can whole-state snapshot/restore at a position
+/// (exact-prefix resume). Optional capability; RealForwardRunner adopts it.
+public protocol KVSnapshotting: AnyObject {
+    func saveKVSnapshot(to url: URL, promptIDs: [Int32], position: Int,
+                        seed: PrefillSeed, logits: MTLBuffer) throws
+    func restoreKVSnapshot(from url: URL, promptIDs: [Int32],
+                           logits: MTLBuffer) throws -> (position: Int, seed: PrefillSeed)?
+}
+
 /// Raw-completion prefill + decode loop shared by the CLI and the Mac app.
 /// Consumes pre-encoded `promptIds` (BOS + verbatim encode upstream — no chat
 /// template). Stop handling, detokenizer flush ordering, and history append
@@ -86,6 +95,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              context: MetalContext,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                             kvSnapshotPath: String? = nil,
                              start: RawCompletionStart = .reset,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
@@ -138,7 +148,38 @@ public func runRawCompletion(producer: any LogitProducer,
     var position = cachedPromptTokens
     var prefillSeed: PrefillSeed?
     let prefillTokens = promptIds[cachedPromptTokens...]
-    switch prefillConfig.mode {
+
+    // Exact-prefix resume: a compatible snapshot replaces the whole prefill
+    // with a state read. Restore failures other than absence are surfaced;
+    // a wrong-prompt file must not silently fall through to prefill with a
+    // half-written state.
+    var restoredFromSnapshot = false
+    var snapshotter: (any KVSnapshotting)?
+    var snapshotURL: URL?
+    if let kvSnapshotPath, start == .reset, cachedPromptTokens == 0,
+       let snap = producer as? any KVSnapshotting {
+        snapshotter = snap
+        snapshotURL = URL(fileURLWithPath: kvSnapshotPath)
+        if let r = try snap.restoreKVSnapshot(from: snapshotURL!,
+                                              promptIDs: promptIds,
+                                              logits: scratch.logits) {
+            guard r.position == promptIds.count else {
+                throw KVSnapshotError.incompatible(
+                    "snapshot position \(r.position) != prompt length \(promptIds.count)")
+            }
+            if case .greedyToken = r.seed, !config.isPureGreedy {
+                throw KVSnapshotError.incompatible(
+                    "greedy-seed snapshot cannot serve a sampling configuration")
+            }
+            position = r.position
+            prefillSeed = r.seed
+            history.append(contentsOf: prefillTokens)
+            restoredFromSnapshot = true
+            onProgress(.prefill(done: promptIds.count, total: promptIds.count))
+        }
+    }
+
+    switch restoredFromSnapshot ? PrefillRuntimeConfig.Mode.off : prefillConfig.mode {
     case .chunked where producer is any ChunkedPrefillRunner:
         let chunked = producer as! any ChunkedPrefillRunner
         let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
@@ -164,6 +205,7 @@ public func runRawCompletion(producer: any LogitProducer,
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
     case .off:
+        guard !restoredFromSnapshot else { break }
         for t in prefillTokens {
             try Task.checkCancellation()
             try await producer.produce(token: t, position: position, into: scratch.logits)
@@ -171,6 +213,15 @@ public func runRawCompletion(producer: any LogitProducer,
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))
         }
+    }
+
+    if !restoredFromSnapshot, let snap = snapshotter, let url = snapshotURL,
+       let seed = prefillSeed {
+        try snap.saveKVSnapshot(to: url,
+                                promptIDs: promptIds,
+                                position: position,
+                                seed: seed,
+                                logits: scratch.logits)
     }
 
     let decodeStart = Date()
