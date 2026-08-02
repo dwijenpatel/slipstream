@@ -90,3 +90,4 @@ void residual_add_fp16(
     if (tid >= count) return;
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
+

@@ -125,6 +125,7 @@ public func run(args: Args,
             lines += "  gpu cb1 (attn+norms+router): " + ms(runner.totalCb1GpuNanos) + " ms\n"
             lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
             lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
+            lines += "  cb1 wait wall:               " + ms(runner.totalCb1WaitWallNanos) + " ms\n"
             if runner.splitCb1Phases {
                 lines += "  gpu cb1/attn linear (GDN):   " + ms(runner.totalCb1LinearAttnGpuNanos) + " ms\n"
                 lines += "  gpu cb1/attn full:           " + ms(runner.totalCb1FullAttnGpuNanos) + " ms\n"

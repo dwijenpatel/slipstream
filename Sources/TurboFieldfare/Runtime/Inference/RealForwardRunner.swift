@@ -531,6 +531,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// type vs the norms+router tail. Adds one extra command buffer per
     /// layer per token; off by default.
     public var splitCb1Phases = false
+    /// Wall time spent blocked in the per-layer router-readback wait.
+    /// Measured 2026-08-01: ~11.8 s of a 19.1 s / 512-token decode, of
+    /// which ~4.6 s is completion-machinery overhead (~230 us x 40
+    /// layers x token). A GPU-side fence + CPU spin does NOT beat
+    /// waitUntilCompleted on M5 (measured 26.8 -> 22.8 tok/s): shared
+    /// atomic stores only become CPU-visible around command-buffer
+    /// completion, and the spin starves the pread executor. The wait is
+    /// irreducible; overlap work into it instead (expert prefetch).
+    public private(set) var totalCb1WaitWallNanos: UInt64 = 0
     public private(set) var totalCb1LinearAttnGpuNanos: UInt64 = 0
     public private(set) var totalCb1FullAttnGpuNanos: UInt64 = 0
     public private(set) var totalCb1TailGpuNanos: UInt64 = 0
@@ -1900,21 +1909,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForCompletion(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            totalCb1WaitWallNanos &+= waitNanos
             if let pending = pendingRoutedCommand {
                 finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-            totalCb1GpuNanos &+= Self.gpuNanos(cb)
-            if let attnCB = cb1AttnCB {
-                totalCb1GpuNanos &+= Self.gpuNanos(attnCB)
-                if isLinear {
-                    totalCb1LinearAttnGpuNanos &+= Self.gpuNanos(attnCB)
-                } else {
-                    totalCb1FullAttnGpuNanos &+= Self.gpuNanos(attnCB)
-                }
-                totalCb1TailGpuNanos &+= Self.gpuNanos(cb)
-            }
+            accountCb1((cb, cb1AttnCB, isLinear))
 
             // CPU readback to fetch routed-expert blobs from disk.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
@@ -2393,6 +2394,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     static func gpuNanos(_ cb: MTLCommandBuffer) -> UInt64 {
         let d = cb.gpuEndTime - cb.gpuStartTime
         return d > 0 ? UInt64(d * 1_000_000_000) : 0
+    }
+
+    private func accountCb1(_ d: (cb: MTLCommandBuffer, attnCB: MTLCommandBuffer?, isLinear: Bool)) {
+        waitForCompletion(d.cb)
+        totalCb1GpuNanos &+= Self.gpuNanos(d.cb)
+        if let attnCB = d.attnCB {
+            totalCb1GpuNanos &+= Self.gpuNanos(attnCB)
+            if d.isLinear {
+                totalCb1LinearAttnGpuNanos &+= Self.gpuNanos(attnCB)
+            } else {
+                totalCb1FullAttnGpuNanos &+= Self.gpuNanos(attnCB)
+            }
+            totalCb1TailGpuNanos &+= Self.gpuNanos(d.cb)
+        }
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {
