@@ -179,6 +179,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                        body: ByteBuffer,
                        context: ChannelHandlerContext) {
         switch (head.method, head.uri) {
+        case (.GET, "/"), (.GET, "/index.html"):
+            writeHTML(context, status: .ok, html: ChatPage.html)
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
@@ -451,6 +453,27 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             status: HTTPResponseStatus,
                             _ error: OpenAIErrorEnvelope) {
         writeCodable(context, status: status, error)
+    }
+
+    private func writeHTML(_ context: ChannelHandlerContext,
+                           status: HTTPResponseStatus,
+                           html: String) {
+        let data = Data(html.utf8)
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            var headers = HTTPHeaders()
+            headers.add(name: "content-type", value: "text/html; charset=utf-8")
+            headers.add(name: "content-length", value: "\(data.count)")
+            let ctx = contextBox.value
+            ctx.write(self.wrapOutboundOut(.head(HTTPResponseHead(version: .http1_1,
+                                                                  status: status,
+                                                                  headers: headers))),
+                      promise: nil)
+            var buf = ctx.channel.allocator.buffer(capacity: data.count)
+            buf.writeBytes(data)
+            ctx.write(self.wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+            ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+        }
     }
 
     private func writeJSON(_ context: ChannelHandlerContext,
