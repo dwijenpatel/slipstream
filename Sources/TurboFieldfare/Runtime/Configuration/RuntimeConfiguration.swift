@@ -20,7 +20,11 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 }
 
 public struct RuntimeConfiguration: Sendable, Equatable {
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32]
+    // Uncapped beyond the upstream 32: slots x layers x expertStride is the
+    // dominant memory block, and on machines with headroom more resident
+    // experts directly cut decode expert-I/O await (the measured decode
+    // bottleneck). 256 covers every expert of every layer on current models.
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 
     public let expertCacheSlots: Int

@@ -203,7 +203,7 @@ extension Args {
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
-                      [8, 16, 24, 32].contains(parsed) else {
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed
