@@ -48,8 +48,9 @@ with context. That measurement, not intuition, sets the roadmap below.
 
 ## Roadmap (value order, all priced by measurement)
 
-1. GQA split-KV decode attention kernel (16 Q heads share 2 KV heads;
-   fixes the only context-scaling cost)
+1. DONE 2026-08-01: GQA split-KV decode attention (full-attn GPU time
+   2.49x faster, KV scan ~90 percent of BW ceiling, context term cut
+   5.4x, decode 24.9 to 26.8 tok/s at 3k)
 2. Decode scheduling: fewer synchronous waits per token (~9 ms/token)
 3. Expert prefetch overlap (hide the 7.8 ms/token I/O await)
 4. KV block persistence on SSD (returning conversations skip prefill;

@@ -388,4 +388,18 @@ import TurboFieldfareValidationSupport
                                seqLen: 128, mode: .full, shareKV: true,
                                seed: 0x177)
     }
+
+    /// Long-sequence coverage at both production full-attention shapes:
+    /// multi-chunk split, GQA-grouped partial, ragged tile tail. seqLen 128
+    /// alone never leaves the single-tile regime the grouped kernel
+    /// optimizes.
+    @Test func attentionFull_qwenShape_longSeq() throws {
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: 3001, mode: .full, seed: 0x178)
+    }
+
+    @Test func attentionFull_gemmaShape_longSeq() throws {
+        try Self.runAndCompare(headDim: 512, numQHeads: 16, numKVHeads: 2,
+                               seqLen: 2047, mode: .full, seed: 0x179)
+    }
 }

@@ -17,7 +17,7 @@ context grows only the 10 full layers' KV.
 | --- | --- | --- | --- |
 | 8 GB | 16 (default) | auto | not yet measured on-tier |
 | 16 GB | 64 | auto | extrapolated, verify |
-| 24 GB | 64-128 | auto | 24-25 tok/s decode, 17.5 s prefill @3k |
+| 24 GB | 64-128 | auto | 25-27 tok/s decode, 17.5 s prefill @3k |
 
 Notes:
 - Slots beyond 64 buy little on a 24 GB machine because the OS page
@@ -35,8 +35,8 @@ Notes:
 | expert I/O await | 7.8 | roadmap item 3 |
 | expert FFN (cb2) | 6.5 | ~70 percent of ceiling, leave |
 | GDN attention (30 layers) | 6.1 | ~75 percent, leave |
-| full attention (10 layers) | 6.1 | ~24 percent of BW ceiling on the
-context-dependent part; roadmap item 1; grows with context |
+| full attention (10 layers) | 2.4 | GQA-grouped split-KV kernel
+(2026-08-01): KV scan ~90 percent of BW ceiling; context term cut 5.4x |
 | output head | 2.4 | |
 | norms + router | 1.3 | |
 
