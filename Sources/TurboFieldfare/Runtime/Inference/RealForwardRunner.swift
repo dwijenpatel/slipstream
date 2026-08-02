@@ -522,6 +522,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public private(set) var totalIoNanos: UInt64 = 0
+    // True GPU execution time per decode bucket, from MTLCommandBuffer
+    // gpuStartTime/gpuEndTime. CPU-side encode counters above cannot
+    // attribute the wait time; these can.
+    public private(set) var totalCb1GpuNanos: UInt64 = 0
+    public private(set) var totalCb2GpuNanos: UInt64 = 0
+    public private(set) var totalHeadGpuNanos: UInt64 = 0
     public private(set) var totalCb1Nanos: UInt64 = 0
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
@@ -1668,6 +1674,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 print("CB error: \(err)")
             }
             totalCb2Nanos &+= pending.encodeAndCommitNanos
+            totalCb2GpuNanos &+= Self.gpuNanos(pending.cb)
+            if let sharedCB = pending.sharedCB {
+                totalCb2GpuNanos &+= Self.gpuNanos(sharedCB)
+            }
+            if let phase1HitCB = pending.phase1HitCB {
+                totalCb2GpuNanos &+= Self.gpuNanos(phase1HitCB)
+            }
         }
 
         func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
@@ -1874,6 +1887,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 pendingRoutedCommand = nil
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+            totalCb1GpuNanos &+= Self.gpuNanos(cb)
 
             // CPU readback to fetch routed-expert blobs from disk.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
@@ -2154,11 +2168,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                runSync(gFusionHead)
+                totalHeadGpuNanos &+= runSyncTimed(gFusionHead)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                runSync { cb in
+                totalHeadGpuNanos &+= runSyncTimed { cb in
                     gFinalNorm(cb)
                     gLmHead(cb)
                 }
@@ -2333,6 +2347,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {
+        _ = runSyncTimed(body)
+    }
+
+    /// runSync that returns the buffer's GPU execution nanos.
+    @discardableResult
+    private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void) -> UInt64 {
         let cb = ctx.queue.makeCommandBuffer()!
         body(cb)
         cb.commit()
@@ -2340,6 +2360,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let err = cb.error {
             print("CB error: \(err)")
         }
+        return Self.gpuNanos(cb)
+    }
+
+    static func gpuNanos(_ cb: MTLCommandBuffer) -> UInt64 {
+        let d = cb.gpuEndTime - cb.gpuStartTime
+        return d > 0 ? UInt64(d * 1_000_000_000) : 0
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {

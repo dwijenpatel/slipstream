@@ -119,6 +119,9 @@ public func run(args: Args,
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
             lines += "  unaccounted (GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
+            lines += "  gpu cb1 (attn+norms+router): " + ms(runner.totalCb1GpuNanos) + " ms\n"
+            lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
+            lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
         if !args.quiet {
