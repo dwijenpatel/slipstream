@@ -51,8 +51,14 @@ with context. That measurement, not intuition, sets the roadmap below.
 1. DONE 2026-08-01: GQA split-KV decode attention (full-attn GPU time
    2.49x faster, KV scan ~90 percent of BW ceiling, context term cut
    5.4x, decode 24.9 to 26.8 tok/s at 3k)
-2. Decode scheduling: fewer synchronous waits per token (~9 ms/token)
-3. Expert prefetch overlap (hide the 7.8 ms/token I/O await)
+2. MEASURED, folded into 3 (2026-08-01): the ~9 ms/token gap is 40
+   irreducible ~207 us waitUntilCompleted round trips (router
+   readback); a GPU-fence spin bypass is bit-identical but slower.
+   The wait cannot shrink; work must overlap into it.
+3. Expert prefetch overlap: prefetch next layers' experts (previous
+   token routing, 85-95 percent next-layer recall in literature)
+   DURING the cb1 wait; hides the 7.8 ms/token I/O await inside the
+   11.8 s/512-token wait wall
 4. KV block persistence on SSD (returning conversations skip prefill;
    oMLX blueprint, including its non-sliceable-state mechanisms; first
    commit is the reload-vs-recompute benchmark)
