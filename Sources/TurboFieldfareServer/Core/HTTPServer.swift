@@ -178,7 +178,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func route(head: HTTPRequestHead,
                        body: ByteBuffer,
                        context: ChannelHandlerContext) {
-        switch (head.method, head.uri) {
+        // Clients append query strings (Claude Code sends
+        // /v1/messages?beta=true); route on the path alone.
+        let path = head.uri.split(separator: "?", maxSplits: 1)[0]
+        switch (head.method, String(path)) {
         case (.GET, "/"), (.GET, "/index.html"):
             writeHTML(context, status: .ok, html: ChatPage.html)
         case (.GET, "/health"):
@@ -191,6 +194,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                              created: 0,
                              ownedBy: "turbofieldfare")])
             writeCodable(context, status: .ok, response)
+        case (.POST, "/v1/messages"):
+            guard head.headers.first(name: "content-type")?
+                .lowercased().hasPrefix("application/json") == true else {
+                writeJSON(context, status: .unsupportedMediaType,
+                          object: AnthropicAdapter.errorBody("content-type must be application/json"))
+                return
+            }
+            handleAnthropicMessages(body: body, context: context)
+        case (.POST, "/v1/messages/count_tokens"):
+            handleAnthropicCountTokens(body: body, context: context)
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -285,6 +298,131 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
+        }
+    }
+
+    private func handleAnthropicMessages(body: ByteBuffer,
+                                         context: ChannelHandlerContext) {
+        do {
+            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
+            let anthropic = try JSONDecoder().decode(AnthropicMessagesRequest.self,
+                                                     from: Data(bytes))
+            let openAI = try AnthropicAdapter.toOpenAI(anthropic, modelID: modelID)
+            let request = try OpenAIRequestValidator.validate(openAI, modelID: modelID,
+                                                              dialect: chatDialect)
+            let responseID = "msg_" + UUID().uuidString.lowercased()
+                .replacingOccurrences(of: "-", with: "")
+            let contextBox = SendableContext(context)
+            let streamState = StreamState()
+            let blockState = AnthropicBlockState()
+            let startStream: @Sendable () -> Void = {
+                guard request.stream,
+                      streamState.start(eventLoop: contextBox.value.eventLoop,
+                                        interval: self.heartbeatInterval,
+                                        ping: {
+                          self.writeHeartbeat(contextBox.value)
+                      }) else { return }
+                self.beginStream(contextBox.value)
+                self.writeRawSSE(contextBox.value,
+                                 AnthropicAdapter.messageStart(id: responseID,
+                                                               model: self.modelID,
+                                                               inputTokens: 0))
+            }
+            activeTask = childChannels.startTask {
+                defer { streamState.stop() }
+                do {
+                    let completion = try await self.coordinator.run(onQueued: startStream) {
+                        startStream()
+                        return try await self.backend.generate(request) { event in
+                            guard request.stream else { return }
+                            switch event {
+                            case .content(let text):
+                                var chunk = ""
+                                if blockState.openTextBlockIfNeeded() {
+                                    chunk += AnthropicAdapter.textBlockStart(
+                                        index: blockState.currentIndex)
+                                }
+                                chunk += AnthropicAdapter.textDelta(
+                                    index: blockState.currentIndex, text: text)
+                                self.writeRawSSE(contextBox.value, chunk)
+                            case .toolCall(let call):
+                                var chunk = ""
+                                if let closed = blockState.closeTextBlock() {
+                                    chunk += AnthropicAdapter.blockStop(index: closed)
+                                }
+                                let index = blockState.nextBlockIndex()
+                                chunk += AnthropicAdapter.toolUseBlock(
+                                    index: index, id: call.id, name: call.name,
+                                    argumentsJSON: call.argumentsJSON)
+                                self.writeRawSSE(contextBox.value, chunk)
+                            }
+                        }
+                    }
+                    if request.stream {
+                        var tail = ""
+                        if let closed = blockState.closeTextBlock() {
+                            tail += AnthropicAdapter.blockStop(index: closed)
+                        }
+                        tail += AnthropicAdapter.messageDelta(
+                            stopReason: AnthropicAdapter.stopReason(
+                                fromFinishReason: completion.finishReason),
+                            outputTokens: completion.usage.completionTokens)
+                        tail += AnthropicAdapter.messageStop()
+                        self.writeRawSSE(contextBox.value, tail)
+                        let endBox = SendableContext(contextBox.value)
+                        contextBox.value.eventLoop.execute {
+                            endBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil)),
+                                                       promise: nil)
+                        }
+                    } else {
+                        self.writeJSON(contextBox.value, status: .ok,
+                                       object: AnthropicAdapter.responseObject(
+                                           id: responseID,
+                                           model: self.modelID,
+                                           completion: completion))
+                    }
+                } catch {
+                    self.handleAsyncError(error,
+                                          context: contextBox.value,
+                                          stream: streamState.isStarted)
+                }
+            }
+        } catch let error as AnthropicAdapterError {
+            if case .unsupported(let message) = error {
+                writeJSON(context, status: .badRequest,
+                          object: AnthropicAdapter.errorBody(message))
+            }
+        } catch let error as ServerRequestError {
+            writeJSON(context,
+                      status: error == .unknownModel ? .notFound : .badRequest,
+                      object: AnthropicAdapter.errorBody(error.envelope.error.message))
+        } catch {
+            writeJSON(context, status: .badRequest,
+                      object: AnthropicAdapter.errorBody("malformed JSON request"))
+        }
+    }
+
+    private func handleAnthropicCountTokens(body: ByteBuffer,
+                                            context: ChannelHandlerContext) {
+        // Character-count estimate (chars / 3.6, the measured Qwen ratio on
+        // English/code). Claude Code uses this for context display and
+        // compaction thresholds; an estimate biased slightly HIGH is safe
+        // (earlier compaction), an accurate count needs a template+tokenizer
+        // pass this endpoint does not pay for.
+        let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
+        let chars = bytes.count
+        let estimate = max(1, Int(Double(chars) / 3.6))
+        writeJSON(context, status: .ok, object: ["input_tokens": estimate])
+    }
+
+    private func writeRawSSE(_ context: ChannelHandlerContext, _ text: String) {
+        guard !text.isEmpty else { return }
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: text.utf8.count)
+            buffer.writeString(text)
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
     }
 
