@@ -9,11 +9,11 @@ let package = Package(
     ],
     products: [
         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
-        .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
-        .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
-        .executable(name: "TurboFieldfareMac", targets: ["TurboFieldfareMac"]),
-        .executable(name: "TurboFieldfareDecodeService", targets: ["TurboFieldfareDecodeService"]),
-        .executable(name: "TurboFieldfareServer", targets: ["TurboFieldfareServer"]),
+        .executable(name: "slipstream-repack", targets: ["TurboFieldfareRepack"]),
+        .executable(name: "slipstream", targets: ["TurboFieldfareCLI"]),
+        .executable(name: "slipstream-mac", targets: ["TurboFieldfareMac"]),
+        .executable(name: "slipstream-decode-service", targets: ["TurboFieldfareDecodeService"]),
+        .executable(name: "slipstream-server", targets: ["TurboFieldfareServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),

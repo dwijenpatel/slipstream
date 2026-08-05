@@ -92,6 +92,9 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE"] == "1" {
             runner.predictRouting = true
         }
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_NO_CB_MERGE"] == "1" {
+            runner.mergeCommandBuffers = false
+        }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PREFETCH"] == "1" {
             runner.predictRouting = true
             runner.prefetchExperts = true

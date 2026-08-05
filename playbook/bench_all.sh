@@ -29,12 +29,12 @@ cd "$(dirname "$0")/.."
 MODEL="${MODEL:-$HOME/models/qwen36.gturbo}"
 PROMPT=docs/benchmark-prompts/real-generation-v1/long-synthesis.json
 MAXNEW=$(( ${SMOKE:-0} == 1 ? 32 : 512 ))
-BIN=.build/release/TurboFieldfareCLI
-BASELINE_BIN="${BASELINE_BIN:-/tmp/ss-baseline/.build/release/TurboFieldfareCLI}"
+BIN=.build/release/slipstream
+BASELINE_BIN="${BASELINE_BIN:-/tmp/ss-baseline/.build/release/slipstream}"
 OUT="bench-results/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 
-if pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null; then
+if pgrep -fl '\.build/release/slipstream|TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null; then
   echo "REFUSING: another model process is running (protocol contamination)."
   exit 1
 fi

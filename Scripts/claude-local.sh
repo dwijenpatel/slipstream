@@ -3,7 +3,7 @@
 # /v1/messages endpoint, Qwen3.6-35B-A3B).
 #
 # Start the server first:
-#   .build/release/TurboFieldfareServer --model ~/models/qwen36.gturbo \
+#   .build/release/slipstream-server --model ~/models/qwen36.gturbo \
 #       --port 8091 --max-context 65536
 #
 # Usage:

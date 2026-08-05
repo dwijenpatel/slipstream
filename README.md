@@ -67,9 +67,21 @@ with context. That measurement, not intuition, sets the roadmap below.
    cache warmer, so post-restore decode ramps from cold; background
    expert sweep after restore is the queued mitigation. Partial-prefix
    block reuse (the oMLX-blueprint hard part) remains open.
-5. Memory-budget dial: one flag that sets expert-cache slots, prefill
+5. MEASURED 2026-08-04, stage-1 decode polish mostly EXHAUSTED: the
+   output head already runs at ~93 percent of the bandwidth ceiling
+   (248k int4 vocab, 2.24 ms floor vs 2.4 measured; no kernel prize),
+   and command-buffer merging (routed-FFN folded into next cb1, head
+   into the final carry; 41 fewer commits + 1 fewer sync per token) is
+   bit-identical but only ~0-2 percent, within noise: the 9 ms/token
+   gap is wake latency on the one irreducible wait per layer, which
+   only multi-token (speculative) decoding can amortize. Merge kept
+   (default on; TURBO_FIELDFARE_NO_CB_MERGE=1 restores the old path).
+   Speculative decoding is confirmed as the only remaining large
+   decode lever: draft model + batched verify + GDN state
+   checkpoint/replay via the chunked kernels.
+6. Memory-budget dial: one flag that sets expert-cache slots, prefill
    chunk, and KV policy together
-6. Playbook automation until a new model is days, not weeks
+7. Playbook automation until a new model is days, not weeks
 
 ## Lineage and attribution
 

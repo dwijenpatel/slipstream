@@ -549,6 +549,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// type vs the norms+router tail. Adds one extra command buffer per
     /// layer per token; off by default.
     public var splitCb1Phases = false
+    /// Merge the routed-FFN command buffer of layer L-1 into layer L's cb1
+    /// (and the head into the last layer's carry), cutting ~41 commit/wake
+    /// boundaries per token. The GPU already serialized these on one queue,
+    /// so ordering and outputs are unchanged; only the boundary count drops.
+    /// Forced off under TURBO_FIELDFARE_CB1_SPLIT (that diagnostic's
+    /// attribution depends on the unmerged structure).
+    public var mergeCommandBuffers = true
     /// Wall time spent blocked in the per-layer router-readback wait.
     /// Measured 2026-08-01: ~11.8 s of a 19.1 s / 512-token decode, of
     /// which ~4.6 s is completion-machinery overhead (~230 us x 40
@@ -1682,6 +1689,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let encodeAndCommitNanos: UInt64
         }
         var pendingRoutedCommand: PendingRoutedCommand?
+        var carryCB: MTLCommandBuffer?
 
         func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
                                         waitIfNeeded: Bool) {
@@ -1763,7 +1771,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Everything up to and including the router runs in a single CB:
             // the only reason to break is the CPU readback of router indices
             // needed to issue I/O for the routed-expert blobs.
-            var cb = ctx.queue.makeCommandBuffer()!
+            var cb = carryCB ?? ctx.queue.makeCommandBuffer()!
+            carryCB = nil
             var cb1AttnCB: MTLCommandBuffer?
             rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
@@ -2222,14 +2231,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    f: FmoE,
                                                    topK: topK)
             gTail(routedCB)
-            routedCB.commit()
-            precondition(pendingRoutedCommand == nil,
-                         "routed command-buffer pipeline drained before queuing the next layer")
-            pendingRoutedCommand = PendingRoutedCommand(
-                cb: routedCB,
-                sharedCB: sharedCB,
-                phase1HitCB: phase1HitCB,
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+            if mergeCommandBuffers && !splitCb1Phases {
+                // Not committed: the next layer's cb1 (or the head) encodes
+                // into this buffer and commits it, collapsing the per-layer
+                // routed commit + the following wake boundary.
+                carryCB = routedCB
+                totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
+            } else {
+                routedCB.commit()
+                precondition(pendingRoutedCommand == nil,
+                             "routed command-buffer pipeline drained before queuing the next layer")
+                pendingRoutedCommand = PendingRoutedCommand(
+                    cb: routedCB,
+                    sharedCB: sharedCB,
+                    phase1HitCB: phase1HitCB,
+                    encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+            }
             continue
         }
         if let pending = pendingRoutedCommand {
@@ -2269,16 +2286,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                totalHeadGpuNanos &+= runSyncTimed(gFusionHead)
+                totalHeadGpuNanos &+= runSyncTimed(gFusionHead, reusing: &carryCB)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                totalHeadGpuNanos &+= runSyncTimed { cb in
+                totalHeadGpuNanos &+= runSyncTimed({ cb in
                     gFinalNorm(cb)
                     gLmHead(cb)
-                }
+                }, reusing: &carryCB)
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
+        } else if let cb = carryCB {
+            // No head this step: the carried routed work must still run.
+            cb.commit()
+            waitForCompletion(cb)
+            carryCB = nil
         }
 
         kv?.advance()
@@ -2454,7 +2476,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// runSync that returns the buffer's GPU execution nanos.
     @discardableResult
     private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void) -> UInt64 {
-        let cb = ctx.queue.makeCommandBuffer()!
+        var none: MTLCommandBuffer?
+        return runSyncTimed(body, reusing: &none)
+    }
+
+    /// When `carry` holds an uncommitted buffer (merged-cb decode path),
+    /// the body encodes into it and the single commit+wait covers both the
+    /// carried work and the body. gpuNanos then includes the carried work;
+    /// the head bucket is documented as coarse in merge mode.
+    private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void,
+                              reusing carry: inout MTLCommandBuffer?) -> UInt64 {
+        let cb = carry ?? ctx.queue.makeCommandBuffer()!
+        carry = nil
         body(cb)
         cb.commit()
         cb.waitUntilCompleted()
