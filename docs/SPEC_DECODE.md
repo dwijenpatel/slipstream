@@ -77,6 +77,15 @@ repair, telemetry) and taught two things that reshape the plan:
    a 250 ms round tax; break-even needs a verify forward costing about
    one decode token.
 
+Code-domain probe (2026-08-05, repetitive-structure generation task):
+determinism gate PASSES; acceptance 33.9 percent, 3.57 emitted/round;
+verify 206 ms/round, replay 71 ms/round (timing counters now in the
+telemetry line). Acceptance rose 5x from prose while round cost barely
+moved - the tax is prefill-path fixed orchestration, settling the M2'
+question quantitatively: at 3.57 emitted/round a ~47 ms batched-decode
+verify round yields ~17 ms per emitted token, ~2x over the 27.7 tok/s
+sequential baseline, before drafting improvements.
+
 Revised milestone order:
 M2': BATCHED DECODE FORWARD - decode-kernel path with tokenCount k+1:
      batched int4 projections, per-position attention (KV grows within

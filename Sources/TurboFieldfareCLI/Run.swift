@@ -147,7 +147,9 @@ public func run(args: Args,
                     + ", drafted " + String(runner.specDrafted)
                     + ", accepted " + String(format: "%.1f", acc) + "%"
                     + ", emitted/round " + String(format: "%.2f", perRound)
-                    + ", replayed " + String(runner.specReplayTokens) + "\n"
+                    + ", replayed " + String(runner.specReplayTokens)
+                    + ", verify " + ms(runner.specVerifyNanos) + " ms"
+                    + ", replay " + ms(runner.specReplayNanos) + " ms\n"
             }
             if runner.predRouteTotal > 0 {
                 let recall = 100.0 * Double(runner.predRouteHits) / Double(runner.predRouteTotal)

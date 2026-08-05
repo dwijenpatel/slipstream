@@ -222,11 +222,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var specAccepted: UInt64 = 0
     public private(set) var specReplayTokens: UInt64 = 0
 
-    public func specNoteRound(drafted: Int, accepted: Int, replayed: Int) {
+    public private(set) var specVerifyNanos: UInt64 = 0
+    public private(set) var specReplayNanos: UInt64 = 0
+
+    public func specNoteRound(drafted: Int, accepted: Int, replayed: Int,
+                              verifyNanos: UInt64 = 0, replayNanos: UInt64 = 0) {
         specRounds &+= 1
         specDrafted &+= UInt64(drafted)
         specAccepted &+= UInt64(accepted)
         specReplayTokens &+= UInt64(replayed)
+        specVerifyNanos &+= verifyNanos
+        specReplayNanos &+= replayNanos
     }
 
     /// Checkpoint / restore the GDN recurrent state around a verify round.

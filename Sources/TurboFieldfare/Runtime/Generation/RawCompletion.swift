@@ -308,11 +308,13 @@ public func runRawCompletion(producer: any LogitProducer,
             runner.specCheckpoint()
             specRoundStart = position
             specRoundTokens = [tokenID] + draft
+            let tVerify = DispatchTime.now().uptimeNanoseconds
             let g = try await runner.specVerifyGreedy(
                 tokens: specRoundTokens[...],
                 startPosition: position,
                 config: prefillConfig,
                 into: scratch.logits)
+            let verifyNanos = DispatchTime.now().uptimeNanoseconds - tVerify
             var accepted = 0
             while accepted < draft.count,
                   g[accepted] == UInt32(bitPattern: draft[accepted]) {
@@ -334,11 +336,14 @@ public func runRawCompletion(producer: any LogitProducer,
                     into: scratch.logits) { _ in }
                 position = specRoundStart + accepted + 1
                 runner.specNoteRound(drafted: draft.count, accepted: accepted,
-                                     replayed: accepted + 1)
+                                     replayed: accepted + 1,
+                                     verifyNanos: verifyNanos,
+                                     replayNanos: DispatchTime.now().uptimeNanoseconds
+                                         - tVerify - verifyNanos)
             } else {
                 position = specRoundStart + draft.count + 1
                 runner.specNoteRound(drafted: draft.count, accepted: accepted,
-                                     replayed: 0)
+                                     replayed: 0, verifyNanos: verifyNanos)
             }
             specQueue = (0...accepted).map { Int32(bitPattern: g[$0]) }
             specRoundQueueSize = specQueue.count
