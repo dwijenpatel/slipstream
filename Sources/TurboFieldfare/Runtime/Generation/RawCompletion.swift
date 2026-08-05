@@ -328,12 +328,11 @@ public func runRawCompletion(producer: any LogitProducer,
                 runner.specRestoreCheckpoint()
                 runner.specRewind(to: specRoundStart)
                 let standing = Array(specRoundTokens.prefix(accepted + 1))
-                _ = try await (producer as! any ChunkedPrefillRunner).prefillChunked(
+                try await runner.specReplay(
                     tokens: standing[...],
                     startPosition: specRoundStart,
-                    outputMode: .stateOnly,
                     config: prefillConfig,
-                    into: scratch.logits) { _ in }
+                    into: scratch.logits)
                 position = specRoundStart + accepted + 1
                 runner.specNoteRound(drafted: draft.count, accepted: accepted,
                                      replayed: accepted + 1,
@@ -364,12 +363,11 @@ public func runRawCompletion(producer: any LogitProducer,
         runner.specRestoreCheckpoint()
         runner.specRewind(to: specRoundStart)
         if !standing.isEmpty {
-            _ = try await (producer as! any ChunkedPrefillRunner).prefillChunked(
+            try await runner.specReplay(
                 tokens: standing[...],
                 startPosition: specRoundStart,
-                outputMode: .stateOnly,
                 config: prefillConfig,
-                into: scratch.logits) { _ in }
+                into: scratch.logits)
         }
         position = specRoundStart + standing.count
     }

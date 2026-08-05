@@ -150,6 +150,18 @@ public func run(args: Args,
                     + ", replayed " + String(runner.specReplayTokens)
                     + ", verify " + ms(runner.specVerifyNanos) + " ms"
                     + ", replay " + ms(runner.specReplayNanos) + " ms\n"
+                if runner.specFwdLayerWaits > 0 {
+                    lines += "  spec fwd: cb1 gpu " + ms(runner.specFwdCb1GpuNanos) + " ms"
+                        + ", cb1 wait wall " + ms(runner.specFwdWaitWallNanos) + " ms"
+                        + " (" + String(runner.specFwdLayerWaits) + " waits)"
+                        + ", io " + ms(runner.specFwdIoNanos) + " ms"
+                        + ", head gpu " + ms(runner.specFwdHeadGpuNanos) + " ms"
+                        + ", head wall " + ms(runner.specFwdHeadWallNanos) + " ms"
+                        + ", union experts/layer "
+                        + String(format: "%.1f",
+                                 Double(runner.specFwdUnionExperts)
+                                     / Double(max(1, runner.specFwdLayerWaits))) + "\n"
+                }
             }
             if runner.predRouteTotal > 0 {
                 let recall = 100.0 * Double(runner.predRouteHits) / Double(runner.predRouteTotal)

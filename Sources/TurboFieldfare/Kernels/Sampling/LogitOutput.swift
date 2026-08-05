@@ -62,7 +62,9 @@ final class Sample {
     /// state — tests pass identical seeds to assert determinism.
     func encode(commandBuffer: MTLCommandBuffer,
                        probs: MTLBuffer,
+                       probsOffset: Int = 0,
                        outToken: MTLBuffer,
+                       outTokenOffset: Int = 0,
                        v: UInt32,
                        temperature: Float = 1.0,
                        topK: UInt32 = 0,
@@ -71,8 +73,8 @@ final class Sample {
                        position: UInt32 = 0) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
-        enc.setBuffer(probs,    offset: 0, index: 0)
-        enc.setBuffer(outToken, offset: 0, index: 1)
+        enc.setBuffer(probs,    offset: probsOffset, index: 0)
+        enc.setBuffer(outToken, offset: outTokenOffset, index: 1)
         var vVar    = v
         var tVar    = temperature
         var kVar    = topK

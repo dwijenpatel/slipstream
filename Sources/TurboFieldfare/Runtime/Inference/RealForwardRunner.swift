@@ -224,6 +224,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public private(set) var specVerifyNanos: UInt64 = 0
     public private(set) var specReplayNanos: UInt64 = 0
+    /// M2' verify-forward attribution (specVerifyDecode only, verify and
+    /// replay combined): GPU time of the per-layer cb1s (carried routed
+    /// work included), CPU wall blocked on those cb1s, expert-union fetch
+    /// awaits, and the head cb (GPU / blocked wall).
+    public private(set) var specFwdCb1GpuNanos: UInt64 = 0
+    public private(set) var specFwdWaitWallNanos: UInt64 = 0
+    public private(set) var specFwdIoNanos: UInt64 = 0
+    public private(set) var specFwdHeadGpuNanos: UInt64 = 0
+    public private(set) var specFwdHeadWallNanos: UInt64 = 0
+    public private(set) var specFwdLayerWaits: UInt64 = 0
 
     public func specNoteRound(drafted: Int, accepted: Int, replayed: Int,
                               verifyNanos: UInt64 = 0, replayNanos: UInt64 = 0) {
@@ -246,6 +256,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// chunk (speculative verify). Capacity bounds draft length.
     public static let maxSpecTokens = 32
     private var specTokensBuf: MTLBuffer?
+    /// One preallocated routed argument buffer per draft row (M2' verify):
+    /// row i's phase1/phase2 read arg buffer i, rewritten each layer after
+    /// the previous layer's routed work has completed at the cb1 wait.
+    private var specRoutedArgBufs: [MTLBuffer] = []
+    /// Batched-head scratch for the M2' verify: [maxSpecTokens, vocab]
+    /// logits written by one QMM (head weights read once per 8-row tile
+    /// instead of once per row), then per-row GPU argmax.
+    private var specLogitsT: MTLBuffer?
+    private var specArgmax: Sample?
+    /// Total experts fetched per (layer, round) across verify forwards;
+    /// with specFwdLayerWaits this gives the mean union size, which decides
+    /// whether a gather-GEMM over the union can beat the per-token loop.
+    public private(set) var specFwdUnionExperts: UInt64 = 0
+    /// TURBO_FIELDFARE_SPEC_PREFILL_VERIFY=1 restores the M1 prefill-path
+    /// verify (measured 206 ms/round fixed orchestration); default is the
+    /// M2' batched decode-forward verify.
+    private let specPrefillVerifyPath =
+        ProcessInfo.processInfo.environment["TURBO_FIELDFARE_SPEC_PREFILL_VERIFY"] == "1"
     public private(set) var lastSpecTokens: [UInt32] = []
     private let predIndices: MTLBuffer   // [topK] UInt32
     private let predWeights: MTLBuffer   // [topK] FP16
@@ -746,12 +774,461 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  config: PrefillRuntimeConfig,
                                  into logits: MTLBuffer) async throws -> [UInt32] {
         precondition(tokens.count <= Self.maxSpecTokens)
-        _ = try await prefillChunked(tokens: tokens,
-                                     startPosition: startPosition,
-                                     outputMode: .perPositionGreedy,
-                                     config: config,
-                                     into: logits) { _ in }
-        return lastSpecTokens
+        if specPrefillVerifyPath || cfg.ffnSandwichNorms || !useFusedGreedyHead {
+            _ = try await prefillChunked(tokens: tokens,
+                                         startPosition: startPosition,
+                                         outputMode: .perPositionGreedy,
+                                         config: config,
+                                         into: logits) { _ in }
+            return lastSpecTokens
+        }
+        return try await specVerifyDecode(tokens: tokens,
+                                          startPosition: startPosition,
+                                          config: config,
+                                          emitHeads: true)
+    }
+
+    /// State-only replay after a partial acceptance: [anchor, accepted
+    /// drafts..., correction] re-advances KV and GDN state from the
+    /// restored checkpoint. Same forward as the verify, no heads.
+    public func specReplay(tokens: ArraySlice<Int32>,
+                           startPosition: Int,
+                           config: PrefillRuntimeConfig,
+                           into logits: MTLBuffer) async throws {
+        precondition(tokens.count <= Self.maxSpecTokens)
+        if specPrefillVerifyPath || cfg.ffnSandwichNorms || !useFusedGreedyHead {
+            _ = try await prefillChunked(tokens: tokens,
+                                         startPosition: startPosition,
+                                         outputMode: .stateOnly,
+                                         config: config,
+                                         into: logits) { _ in }
+            return
+        }
+        _ = try await specVerifyDecode(tokens: tokens,
+                                       startPosition: startPosition,
+                                       config: config,
+                                       emitHeads: false)
+    }
+
+    /// SPEC_DECODE.md M2': the batched decode-forward verify. One t-row
+    /// forward built from the batched prefill compute kernels (weights
+    /// read once per projection, chunked GDN, causal chunk attention)
+    /// with decode-style MoE orchestration: ONE router sync per layer, a
+    /// single UNION expert fetch, and per-token routed phase1/phase2
+    /// through the decode MoE kernels. Advances KV by t and the GDN
+    /// state through all t tokens; the caller owns checkpoint/restore
+    /// and position rewind.
+    private func specVerifyDecode(tokens: ArraySlice<Int32>,
+                                  startPosition: Int,
+                                  config: PrefillRuntimeConfig,
+                                  emitHeads: Bool) async throws -> [UInt32] {
+        let t = tokens.count
+        precondition(t > 0 && t <= Self.maxSpecTokens)
+        guard !cfg.ffnSandwichNorms else {
+            // The routed section below folds the shared branch as phase2's
+            // residual, which is the plain pre-norm dataflow; the sandwich
+            // architecture verifies via the prefill path instead.
+            throw PrefillError.chunkedUnsupported(
+                "spec decode verify supports the plain pre-norm MoE block only")
+        }
+        guard let kv else {
+            throw PrefillError.chunkedUnsupported("spec verify requires FP16 KV")
+        }
+        guard kv.position == startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "spec verify cursor \(kv.position) != startPosition \(startPosition)")
+        }
+        guard startPosition + t <= maxContext else {
+            throw PrefillError.chunkedUnsupported(
+                "spec verify range [\(startPosition), \(startPosition + t)) exceeds maxContext \(maxContext)")
+        }
+        try prefillChunkState.requireClean(operation: "specVerifyDecode")
+        let scratch = try ensurePrefillScratch(config: config)
+        guard t <= scratch.layout.chunkTokens else {
+            throw PrefillError.chunkedUnsupported(
+                "spec verify token count \(t) exceeds scratch chunk size \(scratch.layout.chunkTokens)")
+        }
+        let layerViews = try makePrefillLayerViews()
+
+        let D = cfg.hiddenSize
+        let dRowBytes = D * MemoryLayout<Float16>.stride
+        let halfBytes = MemoryLayout<Float16>.stride
+        let eps: Float = 1e-6
+        let embedOutScale = cfg.embeddingScaledBySqrtHidden
+            ? Float(D).squareRoot()
+            : 1.0
+        let topK = cfg.topKExperts
+        let FmoE = UInt32(cfg.moeIntermediateSize)
+
+        let tokenIDs = tokens.map { UInt32(bitPattern: $0) }
+        guard let tokenBuffer = ctx.device.makeBuffer(
+            bytes: tokenIDs,
+            length: tokenIDs.count * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        while specRoutedArgBufs.count < Self.maxSpecTokens {
+            guard let buf = ctx.device.makeBuffer(
+                length: moe.routedArgumentBufferLength,
+                options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            specRoutedArgBufs.append(buf)
+        }
+        if emitHeads, specTokensBuf == nil {
+            specTokensBuf = ctx.device.makeBuffer(
+                length: Self.maxSpecTokens * MemoryLayout<UInt32>.size,
+                options: .storageModeShared)
+        }
+
+        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: t)
+
+        struct PendingRouted {
+            let cb: MTLCommandBuffer
+            let sharedCB: MTLCommandBuffer
+            let encodeAndCommitNanos: UInt64
+        }
+        var pendingRouted: PendingRouted?
+        func finishPendingRouted(_ pending: PendingRouted, waitIfNeeded: Bool) {
+            if waitIfNeeded {
+                waitForCompletion(pending.sharedCB)
+                waitForCompletion(pending.cb)
+            } else if let err = pending.cb.error {
+                print("CB error: \(err)")
+            }
+            if let err = pending.sharedCB.error {
+                print("CB error: \(err)")
+            }
+            totalCb2Nanos &+= pending.encodeAndCommitNanos
+            totalCb2GpuNanos &+= Self.gpuNanos(pending.cb)
+            totalCb2GpuNanos &+= Self.gpuNanos(pending.sharedCB)
+        }
+
+        let emb = model.embedding
+        guard let firstCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        prefillEmbed.encode(commandBuffer: firstCB,
+                            table: emb.buffer,
+                            tableOffset: Int(emb.offset),
+                            scales: emb.buffer,
+                            scalesOffset: Int(emb.scaleOffset),
+                            biases: emb.buffer,
+                            biasesOffset: Int(emb.biasOffset),
+                            tokens: tokenBuffer,
+                            out: scratch.hidden,
+                            t: UInt32(t),
+                            d: UInt32(D),
+                            outScale: embedOutScale)
+        var carryCB: MTLCommandBuffer? = firstCB
+
+        for L in 0..<cfg.numLayers {
+            model.beginOpeningRoutedExpertStreamer(layer: L)
+            let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let cb: MTLCommandBuffer
+            if let carried = carryCB {
+                cb = carried
+                carryCB = nil
+            } else {
+                guard let fresh = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                cb = fresh
+            }
+            // forceQMM: at verify t the repeatedGEMV policy would re-read
+            // every projection weight t times; QMM reads them once per
+            // 8-row tile (measured below in SPEC_DECODE.md).
+            try encodePrefillLayerThroughRouter(cb: cb,
+                                                layer: L,
+                                                views: layerViews[L],
+                                                scratch: scratch,
+                                                t: t,
+                                                startPosition: startPosition,
+                                                forceQMM: true)
+            cb.commit()
+            let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            waitForCompletion(cb)
+            let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            totalCb1WaitWallNanos &+= waitNanos
+            specFwdWaitWallNanos &+= waitNanos
+            specFwdCb1GpuNanos &+= Self.gpuNanos(cb)
+            specFwdLayerWaits &+= 1
+            if let error = cb.error { throw error }
+            if let pending = pendingRouted {
+                finishPendingRouted(pending, waitIfNeeded: false)
+                pendingRouted = nil
+            }
+            totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+
+            // ONE batched readback: every row's top-K, plus the round's
+            // expert union fetched once below.
+            let idPtr = scratch.routeIDs.contents()
+                .bindMemory(to: UInt32.self, capacity: t * topK)
+            var perToken = [[Int]](repeating: [], count: t)
+            for i in 0..<t {
+                var experts = [Int]()
+                experts.reserveCapacity(topK)
+                for k in 0..<topK {
+                    experts.append(min(Int(idPtr[i * topK + k]), cfg.numExperts - 1))
+                }
+                perToken[i] = experts
+            }
+
+            // Shared expert for all rows, committed before the fetch so its
+            // GPU work overlaps the routed-expert pread (decode pattern).
+            guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            let sharedProj = sharedExpertProjections[L]
+            try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                                x: scratch.routedX,
+                                                y: scratch.h1,
+                                                gate: sharedProj.gate,
+                                                up: sharedProj.up,
+                                                down: sharedProj.down,
+                                                scratchGate: scratch.sharedGateScratch,
+                                                scratchUp: scratch.sharedUpScratch,
+                                                scratchAct: scratch.sharedActScratch,
+                                                queryCount: t,
+                                                d: D,
+                                                intermediate: cfg.intermediateSize,
+                                                xStrideElements: D,
+                                                yStrideElements: D)
+            if cfg.sharedExpertGated {
+                let gateView = sharedProj.scalarGate!
+                for row in 0..<t {
+                    int8ScalarGate!.encode(
+                        commandBuffer: sharedCB,
+                        weights: gateView.buffer,
+                        weightsOffset: Int(gateView.offset),
+                        scales: gateView.buffer,
+                        scalesOffset: Int(gateView.scaleOffset),
+                        biases: gateView.buffer,
+                        biasesOffset: Int(gateView.biasOffset),
+                        x: scratch.routedX,
+                        xOffset: row * dRowBytes,
+                        y: scratch.sharedScalarGate,
+                        yOffset: row * halfBytes,
+                        m: 1, n: UInt32(D))
+                }
+                for row in 0..<t {
+                    elementwise!.encodeSigmoidScalarMul(
+                        commandBuffer: sharedCB,
+                        y: scratch.h1,
+                        yOffset: row * dRowBytes,
+                        gate: scratch.sharedScalarGate,
+                        gateOffset: row * halfBytes,
+                        count: D)
+                }
+            }
+            sharedCB.commit()
+
+            // Group tokens so each group's expert union fits the slot
+            // cache: a group's blobs must all be resident while its routed
+            // work runs on the GPU. One group in the common case
+            // (slots >= round union); small caches degrade to more groups,
+            // each non-final group costing one extra sync. A single token
+            // always fits (decode itself needs topK slots).
+            let slotCap = model.routedExpertCacheSlotCount(layer: L) ?? Int.max
+            var groups: [(tokens: Range<Int>, union: [Int])] = []
+            var groupStart = 0
+            var groupUnion: [Int] = []
+            var groupSeen = Set<Int>()
+            for i in 0..<t {
+                var mergedUnion = groupUnion
+                var mergedSeen = groupSeen
+                for expert in perToken[i] where mergedSeen.insert(expert).inserted {
+                    mergedUnion.append(expert)
+                }
+                if mergedUnion.count <= slotCap || i == groupStart {
+                    groupUnion = mergedUnion
+                    groupSeen = mergedSeen
+                } else {
+                    groups.append((groupStart..<i, groupUnion))
+                    groupStart = i
+                    groupUnion = perToken[i]
+                    groupSeen = Set(groupUnion)
+                }
+            }
+            groups.append((groupStart..<t, groupUnion))
+
+            // Routed FFN looped per token through the decode MoE kernels
+            // (per-token expert weights re-read; gather-GEMM is the queued
+            // follow-up if measurement says it pays). phase2 folds the
+            // shared branch as its residual, so the tail adds h2 only.
+            let routedOffsets = model.routedExpertOffsets(layer: L)
+            for (groupIndex, group) in groups.enumerated() {
+                let isLastGroup = groupIndex == groups.count - 1
+                let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let groupBlobs = try await model.fetchRoutedExperts(
+                    layer: L,
+                    experts: group.union)
+                let groupIoNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+                totalIoNanos &+= groupIoNanos
+                specFwdIoNanos &+= groupIoNanos
+                specFwdUnionExperts &+= UInt64(group.union.count)
+                var expertBuffer = [Int: MTLBuffer](minimumCapacity: group.union.count)
+                for (idx, expert) in group.union.enumerated() {
+                    expertBuffer[expert] = groupBlobs[idx].buffer
+                }
+
+                let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                guard let routedCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                for i in group.tokens {
+                    let blobs = perToken[i].map { expertBuffer[$0]! }
+                    let argBuf = specRoutedArgBufs[i]
+                    moe.writeRoutedArgumentBuffer(argBuf,
+                                                  routedBlobs: blobs,
+                                                  topK: UInt32(topK))
+                    moe.encodeRoutedPersistentPhase1U16Load(
+                        commandBuffer: routedCB,
+                        routedArgBuffer: argBuf,
+                        routedBlobs: blobs,
+                        routedOffsets: routedOffsets,
+                        x: scratch.routedX,
+                        xOffset: i * dRowBytes,
+                        acts: moeActs,
+                        d: UInt32(D),
+                        f: FmoE,
+                        topK: UInt32(topK))
+                    moe.encodeRoutedPersistentPhase2Reduce(
+                        commandBuffer: routedCB,
+                        routedArgBuffer: argBuf,
+                        routedBlobs: blobs,
+                        routedOffsets: routedOffsets,
+                        acts: moeActs,
+                        routingWeights: scratch.routeWeights,
+                        routingWeightsOffset: i * topK * halfBytes,
+                        residual: scratch.h1,
+                        residualOffset: i * dRowBytes,
+                        y: scratch.h2,
+                        yOffset: i * dRowBytes,
+                        d: UInt32(D),
+                        f: FmoE,
+                        topK: UInt32(topK))
+                }
+                guard isLastGroup else {
+                    // The next group's fetch may evict this group's slots;
+                    // its GPU reads must land first.
+                    routedCB.commit()
+                    waitForCompletion(routedCB)
+                    if let error = routedCB.error { throw error }
+                    totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
+                    totalCb2GpuNanos &+= Self.gpuNanos(routedCB)
+                    continue
+                }
+                elementwise!.encodeResidualAdd(commandBuffer: routedCB,
+                                               hidden: scratch.hidden,
+                                               delta: scratch.h2,
+                                               count: t * D)
+                if mergeCommandBuffers {
+                    carryCB = routedCB
+                    totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
+                } else {
+                    routedCB.commit()
+                    precondition(pendingRouted == nil,
+                                 "spec routed pipeline drained before queuing the next layer")
+                    pendingRouted = PendingRouted(
+                        cb: routedCB,
+                        sharedCB: sharedCB,
+                        encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+                }
+            }
+        }
+        if let pending = pendingRouted {
+            finishPendingRouted(pending, waitIfNeeded: true)
+            pendingRouted = nil
+        }
+
+        var result: [UInt32] = []
+        if emitHeads {
+            let finalNorm = model.finalNorm
+            let lm = model.lmHead
+            let vocab = cfg.vocabSize
+            if specLogitsT == nil {
+                specLogitsT = ctx.device.makeBuffer(
+                    length: Self.maxSpecTokens * vocab * MemoryLayout<Float16>.stride,
+                    options: .storageModePrivate)
+            }
+            if specArgmax == nil {
+                specArgmax = try Sample(context: ctx)
+            }
+            guard let logitsT = specLogitsT, let argmax = specArgmax else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            let headCB: MTLCommandBuffer
+            if let carried = carryCB {
+                headCB = carried
+                carryCB = nil
+            } else {
+                guard let fresh = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                headCB = fresh
+            }
+            let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            // Batched head: one t-row final norm, one QMM over the vocab
+            // (head weights read once per 8-row tile instead of once per
+            // row: 2.4 GB -> ~0.5 GB at t=9), then a per-row argmax.
+            // Sample with temperature 0 is a pure argmax, and argmax over
+            // raw logits equals argmax over softcapped/softmaxed probs
+            // (both maps are monotone).
+            prefillRMS.encodeBF16W(commandBuffer: headCB,
+                                   x: scratch.hidden,
+                                   weight: finalNorm.buffer,
+                                   weightOffset: Int(finalNorm.offset),
+                                   out: scratch.normed,
+                                   t: UInt32(t),
+                                   d: UInt32(D),
+                                   eps: eps)
+            prefillQMM.encode(commandBuffer: headCB,
+                              weights: lm.buffer,
+                              weightsOffset: Int(lm.offset),
+                              scales: lm.buffer,
+                              scalesOffset: Int(lm.scaleOffset),
+                              biases: lm.buffer,
+                              biasesOffset: Int(lm.biasOffset),
+                              x: scratch.normed,
+                              y: logitsT,
+                              t: t,
+                              n: vocab,
+                              k: D)
+            for row in 0..<t {
+                argmax.encode(
+                    commandBuffer: headCB,
+                    probs: logitsT,
+                    probsOffset: row * vocab * MemoryLayout<Float16>.stride,
+                    outToken: specTokensBuf!,
+                    outTokenOffset: row * MemoryLayout<UInt32>.size,
+                    v: UInt32(vocab),
+                    temperature: 0,
+                    seed: 0)
+            }
+            headCB.commit()
+            waitForCompletion(headCB)
+            if let error = headCB.error { throw error }
+            totalHeadGpuNanos &+= Self.gpuNanos(headCB)
+            specFwdHeadGpuNanos &+= Self.gpuNanos(headCB)
+            let headWall = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
+            totalHeadFusedNanos &+= headWall
+            specFwdHeadWallNanos &+= headWall
+            let ptr = specTokensBuf!.contents().bindMemory(to: UInt32.self,
+                                                           capacity: t)
+            result = (0..<t).map { ptr[$0] }
+            lastSpecTokens = result
+            lastGreedyToken = result[t - 1]
+        } else if let carried = carryCB {
+            carried.commit()
+            waitForCompletion(carried)
+            if let error = carried.error { throw error }
+            carryCB = nil
+        }
+
+        kv.advance(by: t)
+        prefillChunkState.markCommitted()
+        return result
     }
 
     @discardableResult
@@ -765,72 +1242,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return scratch
     }
 
-    private func executePrefillChunk(tokens: ArraySlice<Int32>,
-                                     startPosition: Int,
-                                     outputMode: PrefillOutputMode,
-                                     logits: MTLBuffer,
-                                     scratch: PrefillChunkScratchBuffers,
-                                     config: PrefillRuntimeConfig,
-                                     writeFinalHead: Bool) async throws {
-        guard !tokens.isEmpty else { return }
-        guard kv != nil else {
-            throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
-        }
-        let kvPosition = kv?.position ?? 0
-        guard kvPosition == startPosition else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
-        }
-        guard startPosition >= 0, startPosition + tokens.count <= maxContext else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill range [\(startPosition), \(startPosition + tokens.count)) exceeds maxContext \(maxContext)")
-        }
-        guard tokens.count <= scratch.layout.chunkTokens else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill token count \(tokens.count) exceeds scratch chunk size \(scratch.layout.chunkTokens)")
-        }
-        if let kv, kv.fp16RingEnabled, let ringLayer = (0..<cfg.numLayers).first(where: {
-            kv.ringCapacity(layer: $0) > 0
-        }) {
-            let requiredCapacity = min(maxContext, cfg.slidingWindow + config.chunkTokens)
-            let ringCapacity = kv.ringCapacity(layer: ringLayer)
-            guard requiredCapacity <= ringCapacity else {
-                throw PrefillError.chunkedUnsupported(
-                    "FP16 KV ring capacity \(ringCapacity) cannot hold required capacity \(requiredCapacity) for maxContext \(maxContext), slidingWindow \(cfg.slidingWindow), and prefillChunkTokens \(config.chunkTokens)")
-            }
-        }
+    private struct LayerPrefillQKVViews {
+        let inputNorm: TensorView
+        let postAttention: TensorView
+        let router: TensorView
+        // Softmax-attention layers only (nil on linear-attention layers).
+        let q: TensorView?
+        let k: TensorView?
+        let v: TensorView?
+        let o: TensorView?
+        let qNorm: TensorView?
+        let kNorm: TensorView?
+        // Gemma FFN sandwich only.
+        let preFFN: TensorView?
+        let preFFN2: TensorView?
+        let postFFN2: TensorView?
+        let postFFN: TensorView?
+        let layerScalar: TensorView?
+        let routerPerExpertScale: TensorView?
+        // Gated-DeltaNet linear-attention layers only.
+        let linQKV: TensorView?
+        let linZ: TensorView?
+        let linA: TensorView?
+        let linB: TensorView?
+        let linOut: TensorView?
+        let linConv: TensorView?
+        let linALog: TensorView?
+        let linDtBias: TensorView?
+        let linNorm: TensorView?
+    }
 
-        struct LayerPrefillQKVViews {
-            let inputNorm: TensorView
-            let postAttention: TensorView
-            let router: TensorView
-            // Softmax-attention layers only (nil on linear-attention layers).
-            let q: TensorView?
-            let k: TensorView?
-            let v: TensorView?
-            let o: TensorView?
-            let qNorm: TensorView?
-            let kNorm: TensorView?
-            // Gemma FFN sandwich only.
-            let preFFN: TensorView?
-            let preFFN2: TensorView?
-            let postFFN2: TensorView?
-            let postFFN: TensorView?
-            let layerScalar: TensorView?
-            let routerPerExpertScale: TensorView?
-            // Gated-DeltaNet linear-attention layers only.
-            let linQKV: TensorView?
-            let linZ: TensorView?
-            let linA: TensorView?
-            let linB: TensorView?
-            let linOut: TensorView?
-            let linConv: TensorView?
-            let linALog: TensorView?
-            let linDtBias: TensorView?
-            let linNorm: TensorView?
-        }
-
-        let layerViews = try (0..<cfg.numLayers).map { L in
+    private func makePrefillLayerViews() throws -> [LayerPrefillQKVViews] {
+        try (0..<cfg.numLayers).map { L in
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let isLinear = cfg.layerIsLinear(L)
             let sandwich = cfg.ffnSandwichNorms
@@ -864,168 +1307,151 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 linDtBias: isLinear ? try model.linearDtBias(layer: L) : nil,
                 linNorm: isLinear ? try model.linearNorm(layer: L) : nil)
         }
+    }
 
-        let tokenIDs = tokens.map { UInt32(bitPattern: $0) }
-        guard let tokenBuffer = ctx.device.makeBuffer(bytes: tokenIDs,
-                                                      length: tokenIDs.count * MemoryLayout<UInt32>.stride,
-                                                      options: .storageModeShared) else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        let D = cfg.hiddenSize
-        let eps: Float = 1e-6
-        let embedOutScale = cfg.embeddingScaledBySqrtHidden
-            ? Float(D).squareRoot()
-            : 1.0
-        let t = tokens.count
-        let emb = model.embedding
-
-        func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
-                                  family: PrefillProjectionFamily,
-                                  weights: TensorView,
-                                  x: MTLBuffer,
-                                  y: MTLBuffer,
-                                  rows: Int,
-                                  columns: Int,
-                                  tokenCount: Int,
-                                  xStrideElements: Int,
-                                  yStrideElements: Int) {
-            if tokenCount >= 32,
-               family == .q || family == .kv || family == .o,
-               let candidate = prefillMPPAffineInt4 {
-                let path = candidate.encode(
-                    commandBuffer: commandBuffer,
-                    weights: weights.buffer,
-                    weightsOffset: Int(weights.offset),
-                    scales: weights.buffer,
-                    scalesOffset: Int(weights.scaleOffset),
-                    biases: weights.buffer,
-                    biasesOffset: Int(weights.biasOffset),
-                    x: x,
-                    y: y,
-                    m: tokenCount,
-                    n: rows,
-                    k: columns)
-                if path == .affineThreadgroupF16 {
-                    return
-                }
-            }
-            if PrefillProjectionDispatchPolicy.selectedDispatch(for: family,
-                                                                chunkTokens: tokenCount) == .qmm {
-                prefillQMM.encode(commandBuffer: commandBuffer,
-                                  weights: weights.buffer,
-                                  weightsOffset: Int(weights.offset),
-                                  scales: weights.buffer,
-                                  scalesOffset: Int(weights.scaleOffset),
-                                  biases: weights.buffer,
-                                  biasesOffset: Int(weights.biasOffset),
-                                  x: x,
-                                  y: y,
-                                  t: tokenCount,
-                                  n: rows,
-                                  k: columns)
+    private func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
+                                      family: PrefillProjectionFamily,
+                                      weights: TensorView,
+                                      x: MTLBuffer,
+                                      y: MTLBuffer,
+                                      rows: Int,
+                                      columns: Int,
+                                      tokenCount: Int,
+                                      xStrideElements: Int,
+                                      yStrideElements: Int,
+                                      forceQMM: Bool = false) {
+        if tokenCount >= 32,
+           family == .q || family == .kv || family == .o,
+           let candidate = prefillMPPAffineInt4 {
+            let path = candidate.encode(
+                commandBuffer: commandBuffer,
+                weights: weights.buffer,
+                weightsOffset: Int(weights.offset),
+                scales: weights.buffer,
+                scalesOffset: Int(weights.scaleOffset),
+                biases: weights.buffer,
+                biasesOffset: Int(weights.biasOffset),
+                x: x,
+                y: y,
+                m: tokenCount,
+                n: rows,
+                k: columns)
+            if path == .affineThreadgroupF16 {
                 return
             }
-            for row in 0..<tokenCount {
-                int4.encode(commandBuffer: commandBuffer,
-                            weights: weights.buffer,
-                            weightsOffset: Int(weights.offset),
-                            scales: weights.buffer,
-                            scalesOffset: Int(weights.scaleOffset),
-                            biases: weights.buffer,
-                            biasesOffset: Int(weights.biasOffset),
-                            x: x,
-                            xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
-                            y: y,
-                            yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
-                            m: UInt32(rows),
-                            n: UInt32(columns))
-            }
         }
-
-        func copyPrefillKV(commandBuffer: MTLCommandBuffer,
-                           source: MTLBuffer,
-                           destination: (buffer: MTLBuffer, offset: Int, stride: Int),
-                           sourceTokenOffset: Int,
-                           tokenCount: Int,
-                           bytesPerToken: Int) throws {
-            guard tokenCount > 0 else { return }
-            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            blit.copy(from: source,
-                      sourceOffset: sourceTokenOffset * bytesPerToken,
-                      to: destination.buffer,
-                      destinationOffset: destination.offset,
-                      size: tokenCount * bytesPerToken)
-            blit.endEncoding()
+        if forceQMM
+            || PrefillProjectionDispatchPolicy.selectedDispatch(for: family,
+                                                                chunkTokens: tokenCount) == .qmm {
+            prefillQMM.encode(commandBuffer: commandBuffer,
+                              weights: weights.buffer,
+                              weightsOffset: Int(weights.offset),
+                              scales: weights.buffer,
+                              scalesOffset: Int(weights.scaleOffset),
+                              biases: weights.buffer,
+                              biasesOffset: Int(weights.biasOffset),
+                              x: x,
+                              y: y,
+                              t: tokenCount,
+                              n: rows,
+                              k: columns)
+            return
         }
-
-        func copyPrefillKVToCache(commandBuffer: MTLCommandBuffer,
-                                  kv: KVCacheManager,
-                                  layer: Int,
-                                  startPosition: Int,
-                                  tokenCount: Int,
-                                  keySource: MTLBuffer,
-                                  valueSource: MTLBuffer,
-                                  bytesPerToken: Int) throws {
-            let capacity = kv.capacity(layer: layer)
-            let physicalStart = startPosition % capacity
-            let firstSpan = min(tokenCount, capacity - physicalStart)
-            let keyFirst = kv.kRange(layer: layer, start: startPosition, count: firstSpan)
-            let valueFirst = kv.vRange(layer: layer, start: startPosition, count: firstSpan)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: keySource,
-                              destination: keyFirst,
-                              sourceTokenOffset: 0,
-                              tokenCount: firstSpan,
-                              bytesPerToken: bytesPerToken)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: valueSource,
-                              destination: valueFirst,
-                              sourceTokenOffset: 0,
-                              tokenCount: firstSpan,
-                              bytesPerToken: bytesPerToken)
-            guard firstSpan < tokenCount else { return }
-
-            let secondCount = tokenCount - firstSpan
-            let secondStart = startPosition + firstSpan
-            let keySecond = kv.kRange(layer: layer, start: secondStart, count: secondCount)
-            let valueSecond = kv.vRange(layer: layer, start: secondStart, count: secondCount)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: keySource,
-                              destination: keySecond,
-                              sourceTokenOffset: firstSpan,
-                              tokenCount: secondCount,
-                              bytesPerToken: bytesPerToken)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: valueSource,
-                              destination: valueSecond,
-                              sourceTokenOffset: firstSpan,
-                              tokenCount: secondCount,
-                              bytesPerToken: bytesPerToken)
+        for row in 0..<tokenCount {
+            int4.encode(commandBuffer: commandBuffer,
+                        weights: weights.buffer,
+                        weightsOffset: Int(weights.offset),
+                        scales: weights.buffer,
+                        scalesOffset: Int(weights.scaleOffset),
+                        biases: weights.buffer,
+                        biasesOffset: Int(weights.biasOffset),
+                        x: x,
+                        xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                        y: y,
+                        yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                        m: UInt32(rows),
+                        n: UInt32(columns))
         }
+    }
 
-        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
-
-        guard var cb = ctx.queue.makeCommandBuffer() else {
+    private func copyPrefillKV(commandBuffer: MTLCommandBuffer,
+                               source: MTLBuffer,
+                               destination: (buffer: MTLBuffer, offset: Int, stride: Int),
+                               sourceTokenOffset: Int,
+                               tokenCount: Int,
+                               bytesPerToken: Int) throws {
+        guard tokenCount > 0 else { return }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
         }
-        prefillEmbed.encode(commandBuffer: cb,
-                            table: emb.buffer,
-                            tableOffset: Int(emb.offset),
-                            scales: emb.buffer,
-                            scalesOffset: Int(emb.scaleOffset),
-                            biases: emb.buffer,
-                            biasesOffset: Int(emb.biasOffset),
-                            tokens: tokenBuffer,
-                            out: scratch.hidden,
-                            t: UInt32(t),
-                            d: UInt32(D),
-                            outScale: embedOutScale)
+        blit.copy(from: source,
+                  sourceOffset: sourceTokenOffset * bytesPerToken,
+                  to: destination.buffer,
+                  destinationOffset: destination.offset,
+                  size: tokenCount * bytesPerToken)
+        blit.endEncoding()
+    }
 
-        for L in 0..<cfg.numLayers {
-            model.beginOpeningRoutedExpertStreamer(layer: L)
-            let views = layerViews[L]
+    private func copyPrefillKVToCache(commandBuffer: MTLCommandBuffer,
+                                      kv: KVCacheManager,
+                                      layer: Int,
+                                      startPosition: Int,
+                                      tokenCount: Int,
+                                      keySource: MTLBuffer,
+                                      valueSource: MTLBuffer,
+                                      bytesPerToken: Int) throws {
+        let capacity = kv.capacity(layer: layer)
+        let physicalStart = startPosition % capacity
+        let firstSpan = min(tokenCount, capacity - physicalStart)
+        let keyFirst = kv.kRange(layer: layer, start: startPosition, count: firstSpan)
+        let valueFirst = kv.vRange(layer: layer, start: startPosition, count: firstSpan)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: keySource,
+                          destination: keyFirst,
+                          sourceTokenOffset: 0,
+                          tokenCount: firstSpan,
+                          bytesPerToken: bytesPerToken)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: valueSource,
+                          destination: valueFirst,
+                          sourceTokenOffset: 0,
+                          tokenCount: firstSpan,
+                          bytesPerToken: bytesPerToken)
+        guard firstSpan < tokenCount else { return }
+
+        let secondCount = tokenCount - firstSpan
+        let secondStart = startPosition + firstSpan
+        let keySecond = kv.kRange(layer: layer, start: secondStart, count: secondCount)
+        let valueSecond = kv.vRange(layer: layer, start: secondStart, count: secondCount)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: keySource,
+                          destination: keySecond,
+                          sourceTokenOffset: firstSpan,
+                          tokenCount: secondCount,
+                          bytesPerToken: bytesPerToken)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: valueSource,
+                          destination: valueSecond,
+                          sourceTokenOffset: firstSpan,
+                          tokenCount: secondCount,
+                          bytesPerToken: bytesPerToken)
+    }
+
+    /// Encode one layer's compute from the input norm THROUGH the router
+    /// into `cb`, using the batched prefill kernels: attention/GDN branch,
+    /// residual + post-attention setup, and the block router (indices and
+    /// weights for all `t` rows land in scratch.routeIDs/routeWeights).
+    /// Shared by the chunked prefill path and the spec-decode verify
+    /// forward (SPEC_DECODE.md M2').
+    private func encodePrefillLayerThroughRouter(cb: MTLCommandBuffer,
+                                                 layer L: Int,
+                                                 views: LayerPrefillQKVViews,
+                                                 scratch: PrefillChunkScratchBuffers,
+                                                 t: Int,
+                                                 startPosition: Int,
+                                                 forceQMM: Bool = false) throws {
+        let D = cfg.hiddenSize
+        let eps: Float = 1e-6
             let isLinear = cfg.layerIsLinear(L)
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let headDim = isFull ? cfg.fullHeadDim : cfg.headDim
@@ -1059,7 +1485,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.qkvDim)
+                                     yStrideElements: la.qkvDim,
+                                 forceQMM: forceQMM)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linZ!,
@@ -1069,7 +1496,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.valueDim)
+                                     yStrideElements: la.valueDim,
+                                 forceQMM: forceQMM)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linA!,
@@ -1079,7 +1507,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.numVHeads)
+                                     yStrideElements: la.numVHeads,
+                                 forceQMM: forceQMM)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linB!,
@@ -1089,7 +1518,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.numVHeads)
+                                     yStrideElements: la.numVHeads,
+                                 forceQMM: forceQMM)
                 let convW = views.linConv!
                 let tail = gdnState.convTailBuffer(layer: L)
                 gdn.encodeConvPrefill(commandBuffer: cb,
@@ -1136,7 +1566,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: la.valueDim,
                                      tokenCount: t,
                                      xStrideElements: la.valueDim,
-                                     yStrideElements: D)
+                                     yStrideElements: D,
+                                 forceQMM: forceQMM)
             } else {
                 let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
                 encodeInt4Projection(commandBuffer: cb,
@@ -1148,7 +1579,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: qProjRows)
+                                     yStrideElements: qProjRows,
+                                 forceQMM: forceQMM)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.k!,
@@ -1158,7 +1590,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: kvDim)
+                                     yStrideElements: kvDim,
+                                 forceQMM: forceQMM)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.v!,
@@ -1168,7 +1601,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: kvDim)
+                                     yStrideElements: kvDim,
+                                 forceQMM: forceQMM)
 
                 // The attention input Q: the packed q_proj output is split
                 // into per-head query/gate halves for gated architectures.
@@ -1287,7 +1721,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          columns: qDim,
                                          tokenCount: t,
                                          xStrideElements: qDim,
-                                         yStrideElements: D)
+                                         yStrideElements: D,
+                                 forceQMM: forceQMM)
             }
             if cfg.ffnSandwichNorms {
                 prefillPostAttention.encode(commandBuffer: cb,
@@ -1353,6 +1788,86 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         d: UInt32(D),
                         topK: UInt32(cfg.topKExperts),
                         hiddenStrideElements: UInt32(D))
+    }
+
+    private func executePrefillChunk(tokens: ArraySlice<Int32>,
+                                     startPosition: Int,
+                                     outputMode: PrefillOutputMode,
+                                     logits: MTLBuffer,
+                                     scratch: PrefillChunkScratchBuffers,
+                                     config: PrefillRuntimeConfig,
+                                     writeFinalHead: Bool) async throws {
+        guard !tokens.isEmpty else { return }
+        guard kv != nil else {
+            throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
+        }
+        let kvPosition = kv?.position ?? 0
+        guard kvPosition == startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
+        }
+        guard startPosition >= 0, startPosition + tokens.count <= maxContext else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill range [\(startPosition), \(startPosition + tokens.count)) exceeds maxContext \(maxContext)")
+        }
+        guard tokens.count <= scratch.layout.chunkTokens else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill token count \(tokens.count) exceeds scratch chunk size \(scratch.layout.chunkTokens)")
+        }
+        if let kv, kv.fp16RingEnabled, let ringLayer = (0..<cfg.numLayers).first(where: {
+            kv.ringCapacity(layer: $0) > 0
+        }) {
+            let requiredCapacity = min(maxContext, cfg.slidingWindow + config.chunkTokens)
+            let ringCapacity = kv.ringCapacity(layer: ringLayer)
+            guard requiredCapacity <= ringCapacity else {
+                throw PrefillError.chunkedUnsupported(
+                    "FP16 KV ring capacity \(ringCapacity) cannot hold required capacity \(requiredCapacity) for maxContext \(maxContext), slidingWindow \(cfg.slidingWindow), and prefillChunkTokens \(config.chunkTokens)")
+            }
+        }
+
+        let layerViews = try makePrefillLayerViews()
+
+        let tokenIDs = tokens.map { UInt32(bitPattern: $0) }
+        guard let tokenBuffer = ctx.device.makeBuffer(bytes: tokenIDs,
+                                                      length: tokenIDs.count * MemoryLayout<UInt32>.stride,
+                                                      options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let D = cfg.hiddenSize
+        let eps: Float = 1e-6
+        let embedOutScale = cfg.embeddingScaledBySqrtHidden
+            ? Float(D).squareRoot()
+            : 1.0
+        let t = tokens.count
+        let emb = model.embedding
+
+        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
+
+        guard var cb = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        prefillEmbed.encode(commandBuffer: cb,
+                            table: emb.buffer,
+                            tableOffset: Int(emb.offset),
+                            scales: emb.buffer,
+                            scalesOffset: Int(emb.scaleOffset),
+                            biases: emb.buffer,
+                            biasesOffset: Int(emb.biasOffset),
+                            tokens: tokenBuffer,
+                            out: scratch.hidden,
+                            t: UInt32(t),
+                            d: UInt32(D),
+                            outScale: embedOutScale)
+
+        for L in 0..<cfg.numLayers {
+            model.beginOpeningRoutedExpertStreamer(layer: L)
+            let views = layerViews[L]
+            try encodePrefillLayerThroughRouter(cb: cb,
+                                                layer: L,
+                                                views: views,
+                                                scratch: scratch,
+                                                t: t,
+                                                startPosition: startPosition)
 
                     cb.commit()
                     waitForCompletion(cb)

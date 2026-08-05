@@ -193,12 +193,26 @@ final class MoE {
         return reusableRoutedArgBuffer
     }
 
+    /// Byte length a caller-owned routed argument buffer must have to be
+    /// written by `writeRoutedArgumentBuffer`. Lets the spec-decode verify
+    /// keep one preallocated argument buffer per draft row instead of
+    /// allocating per (layer, token).
+    var routedArgumentBufferLength: Int { routedArgEncoder.encodedLength }
+
+    func writeRoutedArgumentBuffer(_ buffer: MTLBuffer,
+                                   routedBlobs: [MTLBuffer],
+                                   topK: UInt32) {
+        validate(routedBlobs: routedBlobs, topK: topK)
+        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs)
+    }
+
     func encodeRoutedPersistentPhase1U16Load(
         commandBuffer: MTLCommandBuffer,
         routedArgBuffer: MTLBuffer,
         routedBlobs: [MTLBuffer],
         routedOffsets: MoEExpertOffsets,
         x: MTLBuffer,
+        xOffset: Int = 0,
         acts: MTLBuffer,
         d: UInt32,
         f: UInt32,
@@ -217,7 +231,7 @@ final class MoE {
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
-        encoder.setBuffer(x, offset: 0, index: 2)
+        encoder.setBuffer(x, offset: xOffset, index: 2)
         encoder.setBuffer(acts, offset: 0, index: 3)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
@@ -280,8 +294,11 @@ final class MoE {
         routedOffsets: MoEExpertOffsets,
         acts: MTLBuffer,
         routingWeights: MTLBuffer,
+        routingWeightsOffset: Int = 0,
         residual: MTLBuffer,
+        residualOffset: Int = 0,
         y: MTLBuffer,
+        yOffset: Int = 0,
         d: UInt32,
         f: UInt32,
         topK: UInt32
@@ -299,9 +316,9 @@ final class MoE {
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: 0, index: 2)
-        encoder.setBuffer(routingWeights, offset: 0, index: 3)
-        encoder.setBuffer(residual, offset: 0, index: 4)
-        encoder.setBuffer(y, offset: 0, index: 5)
+        encoder.setBuffer(routingWeights, offset: routingWeightsOffset, index: 3)
+        encoder.setBuffer(residual, offset: residualOffset, index: 4)
+        encoder.setBuffer(y, offset: yOffset, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
         encoder.dispatchThreadgroups(

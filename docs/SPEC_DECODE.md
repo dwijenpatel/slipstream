@@ -95,6 +95,57 @@ M2': BATCHED DECODE FORWARD - decode-kernel path with tokenCount k+1:
 M3': adaptive gating (4-gram-only drafts, rolling-acceptance disable)
      + draft model; sampling after that.
 
+## M2' v1 measured findings (2026-08-05)
+
+Built: specVerifyDecode - the t-row verify/replay forward. Batched
+prefill compute kernels to the router (embed, norms, projections,
+chunk attention, chunked GDN), then decode-style MoE: ONE router sync
+per layer, one batched t x topK readback, shared-expert cb overlapping
+a UNION expert fetch (grouped to the slot cache when it does not fit;
+16-slot default needs groups, 128 slots takes the single-group path),
+per-token phase1/phase2 through the decode MoE kernels, cb-merge carry
+across layers, batched head (t-row norm + QMM + per-row argmax).
+Replay reuses the same forward with emitHeads=false. Env
+TURBO_FIELDFARE_SPEC_PREFILL_VERIFY=1 restores the M1 path.
+
+Code-domain probe (128 slots): DETERMINISM PASSES; acceptance
+identical to M1 (111 rounds, 33.9 percent, 3.57 emitted/round - the
+forward is token-exact vs the M1 verify on this run). Decode
+14.3 -> 16.9 tok/s vs M1, still below the 27.7 sequential baseline.
+Verify 178 ms/round vs target 47. Attribution (new spec-fwd counters):
+cb1 GPU ~3 ms/layer at t=9 DOMINATES (~120 of 178 ms); wake
+0.51 ms/wait and union-fetch await 0.42 ms/layer are the amortized
+fixed terms (37 ms/round, exactly the per-round-not-per-token savings
+spec decode exists to buy); head 18 ms.
+
+Two facts the 47 ms target missed, both now measured:
+
+1. EXISTING BATCHED KERNELS DO NOT AMORTIZE AT SMALL t. Forcing the
+   prefill QMM over the repeatedGEMV policy changed nothing (183.6 vs
+   180.5 ms/round), and the QMM-based batched head ran at ~8x the
+   fused head's bytes (18 ms vs a 4.5 ms weights-once floor). The
+   dispatch policy's t>=32 crossover was encoding this all along: at
+   t<=9 every "batched" matmul in the tree costs ~t GEMVs. The M2'
+   economics require a new small-t kernel family (t in 2..9) that
+   reads weights once at near-BW: multi-row int4 GEMV for
+   projections + head (the old M4 item, now on the critical path).
+2. EXPERT TRAFFIC SCALES WITH VERIFIED TOKENS, NOT EMITTED TOKENS.
+   MoE weights are per-token-routed, so verification pays expert reads
+   for rejected drafts: at t=9 and 3.57 emitted/round, expert bytes
+   per EMITTED token are ~2.5x sequential decode. Partial rescue,
+   measured: the round union is 31.3 experts/layer vs 69 slots'
+   worth of per-token picks (55 percent overlap on code) - a
+   gather-GEMM over the union (prefillGroupedMoE machinery, single
+   tile) halves expert traffic vs the per-token loop.
+
+Revised cost floor with both kernels built: ~1.3 GB resident +
+~2.2 GB union experts + ~0.5 GB head per round ~ 33 ms GPU + 37 ms
+wake/io ~ 72 ms/round ~ 20 ms/emitted ~ 1.8x sequential on code at
+today's acceptance; the draft-model milestone (higher acceptance)
+stacks on top. M2' v2 is therefore a KERNEL campaign, not more
+orchestration: (a) multi-row weights-once int4 GEMV (projections +
+head), (b) union gather-GEMM routed FFN.
+
 ## Invariants and gates
 
 - Correctness gate (revised 2026-08-05, see findings): the spec path
