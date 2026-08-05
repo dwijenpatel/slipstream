@@ -67,6 +67,7 @@ final class LMHeadChainInt4 {
                             biases: MTLBuffer,
                             biasesOffset: Int = 0,
                             outToken: MTLBuffer,
+                            outTokenOffset: Int = 0,
                             d: UInt32,
                             vocab: UInt32,
                             rmsEps: Float = 1e-6) {
@@ -116,7 +117,7 @@ final class LMHeadChainInt4 {
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.setComputePipelineState(rowReducer)
             encoder.setBuffer(rowSummariesBuffer, offset: 0, index: 0)
-            encoder.setBuffer(outToken, offset: 0, index: 1)
+            encoder.setBuffer(outToken, offset: outTokenOffset, index: 1)
             var rowGroupCount = UInt32(rowGroups)
             encoder.setBytes(&rowGroupCount, length: MemoryLayout<UInt32>.size, index: 2)
 

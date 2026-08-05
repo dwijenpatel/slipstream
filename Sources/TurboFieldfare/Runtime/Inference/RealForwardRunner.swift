@@ -213,6 +213,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefetchExperts = false
     private var prefetchTask: Task<Void, Never>?
     public private(set) var prefetchIssued: UInt64 = 0
+    /// Per-position greedy tokens of the last perPositionGreedy prefill
+    /// chunk (speculative verify). Capacity bounds draft length.
+    public static let maxSpecTokens = 32
+    private var specTokensBuf: MTLBuffer?
+    public private(set) var lastSpecTokens: [UInt32] = []
     private let predIndices: MTLBuffer   // [topK] UInt32
     private let predWeights: MTLBuffer   // [topK] FP16
     private var predPrevExperts: [Int]?  // prediction made at layer L-1 for L
@@ -693,12 +698,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 writeFinalHead: spanIndex == spans.count - 1)
             onProgress(span.completedCount)
         }
-        if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+        if outputMode == .perPositionGreedy
+            || (outputMode == .greedyIfAvailable && useFusedGreedyHead) {
             return PrefillResult(newPosition: startPosition + tokens.count,
                                  seed: .greedyToken(lastGreedyToken))
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
                              seed: .logitsWritten)
+    }
+
+    /// Speculative verify primitive (SPEC_DECODE.md M1): run
+    /// [anchor, draft...] from `startPosition` through the chunked prefill
+    /// path and return the greedy token AT EVERY position. Advances KV by
+    /// tokens.count and the GDN state through all tokens; the caller owns
+    /// checkpoint/restore and position rewind.
+    public func specVerifyGreedy(tokens: ArraySlice<Int32>,
+                                 startPosition: Int,
+                                 config: PrefillRuntimeConfig,
+                                 into logits: MTLBuffer) async throws -> [UInt32] {
+        precondition(tokens.count <= Self.maxSpecTokens)
+        _ = try await prefillChunked(tokens: tokens,
+                                     startPosition: startPosition,
+                                     outputMode: .perPositionGreedy,
+                                     config: config,
+                                     into: logits) { _ in }
+        return lastSpecTokens
     }
 
     @discardableResult
@@ -1607,7 +1631,46 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     continue
         }
 
-        if writeFinalHead {
+        if writeFinalHead, outputMode == .perPositionGreedy {
+            precondition(t <= Self.maxSpecTokens,
+                         "verify chunk exceeds maxSpecTokens")
+            let finalNorm = model.finalNorm
+            let lm = model.lmHead
+            if specTokensBuf == nil {
+                specTokensBuf = ctx.device.makeBuffer(
+                    length: Self.maxSpecTokens * MemoryLayout<UInt32>.size,
+                    options: .storageModeShared)
+            }
+            guard let specCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            for row in 0..<t {
+                fusionHead.encodeGreedyDecode(
+                    commandBuffer: specCB,
+                    hidden: scratch.hidden,
+                    hiddenOffset: row * D * MemoryLayout<Float16>.stride,
+                    normWeight: finalNorm.buffer,
+                    normOffset: Int(finalNorm.offset),
+                    weights: lm.buffer,
+                    weightsOffset: Int(lm.offset),
+                    scales: lm.buffer,
+                    scalesOffset: Int(lm.scaleOffset),
+                    biases: lm.buffer,
+                    biasesOffset: Int(lm.biasOffset),
+                    outToken: specTokensBuf!,
+                    outTokenOffset: row * MemoryLayout<UInt32>.size,
+                    d: UInt32(D),
+                    vocab: UInt32(cfg.vocabSize),
+                    rmsEps: eps)
+            }
+            specCB.commit()
+            waitForCompletion(specCB)
+            if let error = specCB.error { throw error }
+            let ptr = specTokensBuf!.contents().bindMemory(to: UInt32.self,
+                                                           capacity: t)
+            lastSpecTokens = (0..<t).map { ptr[$0] }
+            lastGreedyToken = lastSpecTokens[t - 1]
+        } else if writeFinalHead, outputMode != .stateOnly {
             let finalNorm = model.finalNorm
             let lm = model.lmHead
             guard let finalCB = ctx.queue.makeCommandBuffer() else {

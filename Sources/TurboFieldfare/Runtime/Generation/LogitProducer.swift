@@ -22,6 +22,11 @@ protocol ContextWindowReporting: Sendable {
 public enum PrefillOutputMode: Sendable, Equatable {
     case logits
     case greedyIfAvailable
+    /// Speculative verify: fused greedy head applied to EVERY position of
+    /// the final chunk; results land in the runner's specTokens buffer.
+    case perPositionGreedy
+    /// State-advance only (speculative replay): no head at all.
+    case stateOnly
 }
 
 public enum PrefillSeed: Sendable, Equatable {
