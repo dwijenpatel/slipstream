@@ -213,6 +213,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefetchExperts = false
     private var prefetchTask: Task<Void, Never>?
     public private(set) var prefetchIssued: UInt64 = 0
+    /// Speculative decoding (SPEC_DECODE.md M1). Greedy path only; the
+    /// controller lives in runRawCompletion and composes the primitives
+    /// below. Telemetry counters are cumulative per runner.
+    public var specDecodeEnabled = false
+    public private(set) var specRounds: UInt64 = 0
+    public private(set) var specDrafted: UInt64 = 0
+    public private(set) var specAccepted: UInt64 = 0
+    public private(set) var specReplayTokens: UInt64 = 0
+
+    public func specNoteRound(drafted: Int, accepted: Int, replayed: Int) {
+        specRounds &+= 1
+        specDrafted &+= UInt64(drafted)
+        specAccepted &+= UInt64(accepted)
+        specReplayTokens &+= UInt64(replayed)
+    }
+
+    /// Checkpoint / restore the GDN recurrent state around a verify round.
+    public func specCheckpoint() { gdnState?.checkpoint(device: ctx.device) }
+    public func specRestoreCheckpoint() { gdnState?.restoreCheckpoint() }
+    /// Rewind the KV cursor (contents at rewound positions are simply
+    /// overwritten by the replay/next round).
+    public func specRewind(to position: Int) { kv?.restorePosition(position) }
+
     /// Per-position greedy tokens of the last perPositionGreedy prefill
     /// chunk (speculative verify). Capacity bounds draft length.
     public static let maxSpecTokens = 32

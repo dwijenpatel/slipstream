@@ -95,6 +95,9 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_NO_CB_MERGE"] == "1" {
             runner.mergeCommandBuffers = false
         }
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_SPEC"] == "1" {
+            runner.specDecodeEnabled = true
+        }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PREFETCH"] == "1" {
             runner.predictRouting = true
             runner.prefetchExperts = true
@@ -137,6 +140,15 @@ public func run(args: Args,
             lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
             lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
             lines += "  cb1 wait wall:               " + ms(runner.totalCb1WaitWallNanos) + " ms\n"
+            if runner.specRounds > 0 {
+                let acc = 100.0 * Double(runner.specAccepted) / Double(max(1, runner.specDrafted))
+                let perRound = Double(runner.specAccepted + runner.specRounds) / Double(runner.specRounds)
+                lines += "  spec: rounds " + String(runner.specRounds)
+                    + ", drafted " + String(runner.specDrafted)
+                    + ", accepted " + String(format: "%.1f", acc) + "%"
+                    + ", emitted/round " + String(format: "%.2f", perRound)
+                    + ", replayed " + String(runner.specReplayTokens) + "\n"
+            }
             if runner.predRouteTotal > 0 {
                 let recall = 100.0 * Double(runner.predRouteHits) / Double(runner.predRouteTotal)
                 lines += "  predicted-route recall@topk: "

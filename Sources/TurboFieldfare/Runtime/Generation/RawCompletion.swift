@@ -231,6 +231,19 @@ public func runRawCompletion(producer: any LogitProducer,
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
 
+    // Speculative decoding (M1, greedy only): a round verifies
+    // prompt-lookup drafts in one multi-token forward and enqueues the
+    // accepted tokens; iterations drain the queue. specRound* tracks the
+    // last round so a mid-queue stop can repair the state to match what
+    // was actually emitted.
+    let specEnabled = fusedGreedy
+        && (fusedRunner?.specDecodeEnabled ?? false)
+        && prefillConfig.mode == .chunked
+    var specQueue: [Int32] = []
+    var specRoundTokens: [Int32] = []   // [anchor, drafts...] of last round
+    var specRoundStart = 0              // position of the round's anchor
+    var specRoundQueueSize = 0          // emissions the round enqueued
+
     while true {
         try Task.checkCancellation()
 
@@ -244,7 +257,9 @@ public func runRawCompletion(producer: any LogitProducer,
                                      history: history, config: config, position: generated)
             }
         } else if fusedGreedy {
-            tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
+            tokenID = specQueue.isEmpty
+                ? Int32(bitPattern: fusedRunner!.lastGreedyToken)
+                : specQueue.removeFirst()
         } else {
             tokenID = sampleOnce(scratch: scratch, context: context,
                                  history: history, config: config, position: generated)
@@ -279,9 +294,79 @@ public func runRawCompletion(producer: any LogitProducer,
         }
 
         history.append(tokenID)
+        if specEnabled, !specQueue.isEmpty {
+            // This token was processed by the round already; nothing to do.
+            uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+            continue
+        }
+        if specEnabled,
+           let runner = fusedRunner,
+           let draft = promptLookupDraft(history: history,
+                                         maxDraft: min(8, RealForwardRunner.maxSpecTokens - 1)),
+           position + draft.count + 1 <= (producer as? any ContextWindowReporting)
+               .map({ $0.maxContext }) ?? Int.max {
+            runner.specCheckpoint()
+            specRoundStart = position
+            specRoundTokens = [tokenID] + draft
+            let g = try await runner.specVerifyGreedy(
+                tokens: specRoundTokens[...],
+                startPosition: position,
+                config: prefillConfig,
+                into: scratch.logits)
+            var accepted = 0
+            while accepted < draft.count,
+                  g[accepted] == UInt32(bitPattern: draft[accepted]) {
+                accepted += 1
+            }
+            if accepted < draft.count {
+                // Rewind to the round start and replay only what stands:
+                // anchor + accepted drafts. The correction token g[accepted]
+                // is emitted from the queue and processed on a later
+                // iteration (or by the next round).
+                runner.specRestoreCheckpoint()
+                runner.specRewind(to: specRoundStart)
+                let standing = Array(specRoundTokens.prefix(accepted + 1))
+                _ = try await (producer as! any ChunkedPrefillRunner).prefillChunked(
+                    tokens: standing[...],
+                    startPosition: specRoundStart,
+                    outputMode: .stateOnly,
+                    config: prefillConfig,
+                    into: scratch.logits) { _ in }
+                position = specRoundStart + accepted + 1
+                runner.specNoteRound(drafted: draft.count, accepted: accepted,
+                                     replayed: accepted + 1)
+            } else {
+                position = specRoundStart + draft.count + 1
+                runner.specNoteRound(drafted: draft.count, accepted: accepted,
+                                     replayed: 0)
+            }
+            specQueue = (0...accepted).map { Int32(bitPattern: g[$0]) }
+            specRoundQueueSize = specQueue.count
+            uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+            continue
+        }
         try await producer.produce(token: tokenID, position: position, into: scratch.logits)
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+    }
+
+    // A stop that fired while draining a round leaves KV/GDN state ahead of
+    // what was emitted; repair so continuation (server prompt cache) sees a
+    // state exactly matching `history`.
+    if specEnabled, !specQueue.isEmpty, let runner = fusedRunner {
+        let delivered = specRoundQueueSize - specQueue.count
+        let standing = Array(specRoundTokens.prefix(max(0, delivered - 1)))
+        runner.specRestoreCheckpoint()
+        runner.specRewind(to: specRoundStart)
+        if !standing.isEmpty {
+            _ = try await (producer as! any ChunkedPrefillRunner).prefillChunked(
+                tokens: standing[...],
+                startPosition: specRoundStart,
+                outputMode: .stateOnly,
+                config: prefillConfig,
+                into: scratch.logits) { _ in }
+        }
+        position = specRoundStart + standing.count
     }
 
     return RawDecodeResult(prefillTokens: promptIds.count,
@@ -294,6 +379,37 @@ public func runRawCompletion(producer: any LogitProducer,
                            kvPosition: position,
                            kvBackedTokenIDs: history,
                            uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
+}
+
+/// Prompt-lookup drafting: find the most recent PRIOR occurrence of the
+/// history's trailing n-gram (n = 4, then 3, then 2) and propose the
+/// tokens that followed it. Zero-cost draft source; strong on code and
+/// structured text, harmless elsewhere (rejected drafts still yield the
+/// normal token from the same forward).
+private func promptLookupDraft(history: [Int32], maxDraft: Int) -> [Int32]? {
+    guard maxDraft > 0, history.count >= 8 else { return nil }
+    for n in stride(from: 4, through: 2, by: -1) {
+        let suffix = Array(history.suffix(n))
+        let searchEnd = history.count - n   // exclude the suffix itself
+        guard searchEnd > n else { continue }
+        var i = searchEnd - 1
+        while i >= n - 1 {
+            var match = true
+            for j in 0..<n where history[i - n + 1 + j] != suffix[j] {
+                match = false; break
+            }
+            if match {
+                let start = i + 1
+                let count = min(maxDraft, history.count - n - start)
+                if count >= 1 {
+                    return Array(history[start..<start + count])
+                }
+                break
+            }
+            i -= 1
+        }
+    }
+    return nil
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,

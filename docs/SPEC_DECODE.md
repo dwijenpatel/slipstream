@@ -57,6 +57,35 @@ dominate reads), (k+1) head GEMVs at 2.24 ms until M4, checkpoint
 tokens/round comfortably above the round overhead ratio; prompt-lookup
 acceptance on code is the empirical unknown M1 exists to measure.
 
+## M1 measured findings (2026-08-05)
+
+The controller works end to end (rounds, accept, replay, mid-queue
+repair, telemetry) and taught two things that reshape the plan:
+
+1. BYTE-IDENTITY vs the sequential baseline is unachievable across
+   kernel paths: the verify forward (chunked prefill kernels) rounds
+   differently from decode kernels, so near-tie argmax positions flip
+   (observed at char 1763/2600, both continuations fluent). Revised
+   gate: spec output deterministic across repeats; accepted tokens
+   consistent with their own verify pass by construction; fluency
+   spot-check. Same numerics property as every production spec-decode.
+2. The prefill path is the wrong verify vehicle: ~250 ms fixed cost
+   per round (40 per-layer router syncs + expert fetch orchestration,
+   independent of draft length) vs ~1.9 s total for all 93x9 head
+   GEMVs. Long-synthesis greedy: 28.1 -> 12.3 tok/s, acceptance 6.4%
+   on prose (prompt-lookup's worst case). No acceptance rate can pay
+   a 250 ms round tax; break-even needs a verify forward costing about
+   one decode token.
+
+Revised milestone order:
+M2': BATCHED DECODE FORWARD - decode-kernel path with tokenCount k+1:
+     batched int4 projections, per-position attention (KV grows within
+     the batch), CHUNKED GDN step (campaign-4 kernels), one router
+     sync per layer per round, batched int4 head + per-row argmax.
+     Target: verify round ~ 1.3x one decode token.
+M3': adaptive gating (4-gram-only drafts, rolling-acceptance disable)
+     + draft model; sampling after that.
+
 ## Invariants and gates
 
 - Greedy mode output must be BYTE-IDENTICAL to the non-speculative
