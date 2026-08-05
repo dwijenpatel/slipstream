@@ -27,6 +27,41 @@ public final class GDNStateManager {
     private static let fp32Size = 4
     private static let fp16Size = 2
 
+    /// Preallocated shadow copies for speculative-decode checkpointing.
+    private var shadowState: [MTLBuffer?] = []
+    private var shadowTail: [MTLBuffer?] = []
+
+    /// Copy all linear-layer state into preallocated shadow buffers
+    /// (~2 MB state + tail per layer; plain memcpy, no Metal work).
+    /// Lazily allocates the shadows on first use.
+    public func checkpoint(device: MTLDevice) {
+        if shadowState.isEmpty {
+            shadowState = stateBuffers.map { buf in
+                buf.flatMap { device.makeBuffer(length: $0.length, options: .storageModeShared) }
+            }
+            shadowTail = convTailBuffers.map { buf in
+                buf.flatMap { device.makeBuffer(length: $0.length, options: .storageModeShared) }
+            }
+        }
+        for layer in 0..<config.numLayers where config.layerIsLinear(layer) {
+            shadowState[layer]!.contents().copyMemory(
+                from: stateBuffers[layer]!.contents(), byteCount: stateBytesPerLayer)
+            shadowTail[layer]!.contents().copyMemory(
+                from: convTailBuffers[layer]!.contents(), byteCount: convTailBytesPerLayer)
+        }
+    }
+
+    /// Restore the last checkpoint. Precondition: checkpoint() ran.
+    public func restoreCheckpoint() {
+        precondition(!shadowState.isEmpty, "restore without checkpoint")
+        for layer in 0..<config.numLayers where config.layerIsLinear(layer) {
+            stateBuffers[layer]!.contents().copyMemory(
+                from: shadowState[layer]!.contents(), byteCount: stateBytesPerLayer)
+            convTailBuffers[layer]!.contents().copyMemory(
+                from: shadowTail[layer]!.contents(), byteCount: convTailBytesPerLayer)
+        }
+    }
+
     /// (state, conv tail) byte ranges for every linear layer, for
     /// whole-state snapshotting. GDN state is position-exact by
     /// construction, so a snapshot taken at position P restores only to P.
