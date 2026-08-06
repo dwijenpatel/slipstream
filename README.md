@@ -22,8 +22,8 @@ bandwidth.
 Ollama, LM Studio, Jan, KoboldCpp, and GPT4All all wrap it. MLX is Apple's
 framework: mlx-lm is the reference library, oMLX a server built on it, and
 LM Studio ships an MLX engine of its own. Expert streaming keeps weights on
-SSD and fetches only what each token routes to: TurboFieldfare, slipstream,
-SwiftLM. The tail is MLC-LLM, vLLM, llamafile, text-generation-webui,
+SSD and fetches only what each token routes to: TurboFieldfare, SwiftLM,
+and this project. The tail is MLC-LLM, vLLM, llamafile, text-generation-webui,
 transformers on MPS, and the offload projects born on CUDA: ktransformers,
 PowerInfer, Fiddler, MoE-Infinity, AirLLM.
 
@@ -42,12 +42,15 @@ MLX engine over it, for speed you pay for in memory. Take **llama.cpp**,
 or Ollama over it, for the widest model and quantization choice, and note
 it has two distinct configurations: resident by default, or expert tensors
 paged from SSD once you pass both `--n-cpu-moe` and `--no-mmap`. Take
-**slipstream**, TurboFieldfare, or SwiftLM when memory is what binds.
+TurboFieldfare, SwiftLM, or **slipstream** when memory is what binds. That
+last case is more common than it sounds: if you want to keep working on the
+Mac while a good coding model runs, memory is the constraint you hit first,
+not speed.
 
-Same machine, same model, same prompt file. Blank cells are unmeasured,
-not unmeasurable.
+Same machine, same model, same prompt file. Column headings are prompt
+sizes in tokens. Blank cells are unmeasured, not unmeasurable.
 
-| option | RAM | under 1k | ~3k | ~12k | ~24k |
+| option | RAM | <1k prompt | ~3k prompt | ~12k prompt | ~24k prompt |
 | --- | --- | --- | --- | --- | --- |
 | mlx-lm, resident | 21.6 GB | | 41.2 tok/s | | |
 | llama.cpp, default | ~17.4 GB | 0.7 s, 32.6 tok/s | | | |
@@ -55,6 +58,7 @@ not unmeasurable.
 | Ollama | | | | | |
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
+| TurboFieldfare, its defaults | 1.13 GB RSS | | 63.3 s, ~18 tok/s | | |
 | slipstream, out of the box | 1.90 GB | | 18.5 s, 21.4 tok/s | | |
 | slipstream, 128 slots | up to 9.1 GB | 27.7 tok/s | 17.5 s, ~25 tok/s | 20.2 tok/s | 19.5 tok/s |
 | slipstream, KV resume | 1.90 GB | | 0.03 s | | |
