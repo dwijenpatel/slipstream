@@ -37,7 +37,7 @@ REPO="$PWD"
 MODEL_GTURBO="${MODEL_GTURBO:-$HOME/models/qwen36.gturbo}"
 MODEL_GGUF="${MODEL_GGUF:-$HOME/models/qwen3.6-35b/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}"
 MODEL_MLX="${MODEL_MLX:-$HOME/models/qwen3.6-35b-mlx-4bit}"
-BASELINE_BIN="${BASELINE_BIN:-/private/tmp/ss-baseline/.build/release/TurboFieldfareCLI}"
+BASELINE_BIN="${BASELINE_BIN:-$HOME/repos/ss-baseline/.build/release/TurboFieldfareCLI}"
 BIN="$REPO/.build/release/slipstream"
 
 MAXNEW=512
@@ -220,6 +220,10 @@ for ctx in "${CTXS[@]}"; do
     case "$ctx" in 1k) np=1000;; 3k) np=3000;; 12k) np=12000;; 24k) np=24000;; *) np=3000;; esac
     run_llamacpp "llamacpp-default" "$np"
     run_llamacpp "llamacpp-ncpumoe32" "$np" --n-cpu-moe 32
+    # --n-cpu-moe ALONE saves no memory on Metal: the backend wires the whole
+    # mmap'd weights file regardless. Only with mmap off do the CPU-side
+    # expert layers become ordinary pageable memory. Measured 2026-07-20.
+    run_llamacpp "llamacpp-ncpumoe32-nommap" "$np" --n-cpu-moe 32 --mmap 0
   fi
 
   if [ "${INCLUDE_RESIDENT:-0}" = "1" ] && echo "mlx-lm" | grep -qE "$ONLY"; then

@@ -3,12 +3,12 @@
 Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
 near-roofline Metal kernels, and a KV cache that survives the process.
 
-Qwen3.6-35B-A3B generates at 25 tokens per second on a base M5 MacBook in
-1.9 GB of memory, or 32 with more experts cached. Its weights are 18 GB.
+Qwen3.6-35B-A3B generates at 26.5 tokens per second on a base M5 MacBook in
+2.5 GB of memory, or 30.8 in 5.6 GB. Its weights are 18 GB.
 slipstream leaves them on SSD and streams only the eight experts each
 token actually routes to, staying inside a RAM budget you set, so memory is a dial rather than a number the
 model dictates. Prompts do not have to be paid for twice either: the KV
-cache persists to disk, so a 2,940-token prompt that costs 18.5 seconds to
+cache persists to disk, so a 2,940-token prompt that costs 17.4 seconds to
 read the first time comes back in 0.03 seconds, byte for byte, on every run
 after. Doing this without giving up speed is the point of the kernels
 underneath, which are hand-written Metal tuned against what this chip
@@ -47,50 +47,56 @@ last case is more common than it sounds: if you want to keep working on the
 Mac while a good coding model runs, memory is the constraint you hit first,
 not speed.
 
-Same machine, same model, same prompt file. Column headings are prompt
-sizes in tokens. Blank cells are unmeasured, not unmeasurable.
+Same machine, same model, same prompt files, 512 generated tokens per cell.
+Column headings are prompt sizes: 889, 2,940, 11,738 and 23,827 tokens.
+Blank cells are unmeasured, not unmeasurable.
 
-Peak memory, and time to first token:
+Time to first token, in seconds:
 
-| option                                 | peak RAM | <1k   | ~3k      | ~12k | ~24k |
-| -------------------------------------- | -------- | ----- | -------- | ---- | ---- |
-| mlx-lm, resident                       | 21.6 GB  |       | see note |      |      |
-| llama.cpp, default                     | ~17.4 GB | 0.7 s |          |      |      |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap`  | ~5.7 GB  | 2.6 s |          |      |      |
-| Ollama                                 |          |       |          |      |      |
-| LM Studio, MLX engine                  |          |       |          |      |      |
-| SwiftLM                                |          |       |          |      |      |
-| TurboFieldfare, default settings       | 1.42 GB  |       | 63.9 s   |      |      |
-| slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 18.5 s   |      |      |
-| slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
-| slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
-| slipstream, 96 of 256 cached           | 6.8 GB   |       |          |      |      |
-| slipstream, 128 of 256 cached          | 9.1 GB   |       | 17.5 s   |      |      |
-| slipstream, 192 of 256 cached          | 13.6 GB  |       |          |      |      |
-| slipstream, KV resume                  | 1.90 GB  |       | 0.03 s   |      |      |
+| option                          | memory  | 1k   | 3k   | 12k   | 24k   |
+| ------------------------------- | ------- | ---- | ---- | ----- | ----- |
+| mlx-lm, all weights resident    | 21.6 GB |      |      |       |       |
+| llama.cpp, default              | 16.2 GB | 1.2  | 3.8  | 18.5  | 44.9  |
+| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 2.5  | 7.8  | 35.0  | 78.2  |
+| llama.cpp, that plus `--mmap 0` | 17.2 GB | 2.8  | 11.0 | 51.4  | 141.8 |
+| Ollama                          |         |      |      |       |       |
+| LM Studio, MLX engine           |         |      |      |       |       |
+| SwiftLM                         |         |      |      |       |       |
+| TurboFieldfare, defaults        | 2.0 GB  | 14.3 | 42.5 | 185.1 | 664.8 |
+| TurboFieldfare, 32 of 256       | 3.0 GB  | 15.5 | 70.5 | 265.5 | 720.5 |
+| slipstream, 16 of 256 (default) | 2.5 GB  | 9.3  | 17.4 | 116.9 | 381.7 |
+| slipstream, 32 of 256           | 3.5 GB  | 9.4  | 17.3 | 116.9 | 381.4 |
+| slipstream, 64 of 256           | 5.6 GB  | 9.4  | 17.4 | 117.0 | 381.8 |
+| slipstream, 96 of 256           | 7.8 GB  | 9.5  | 17.5 | 117.2 | 382.0 |
+| slipstream, 128 of 256          | 9.9 GB  | 9.5  | 17.5 | 117.4 | 382.8 |
+| slipstream, 192 of 256          | 14.1 GB | 9.5  | 17.4 | 145.5 | 475.4 |
+| slipstream, KV resume           |         |      | 0.03 |       |       |
 
 Sustained decode, in tokens per second:
 
-| option                                 | peak RAM | <1k   | ~3k      | ~12k | ~24k |
-| -------------------------------------- | -------- | ----- | -------- | ---- | ---- |
-| mlx-lm, resident                       | 21.6 GB  |       | 41.2     |      |      |
-| llama.cpp, default                     | ~17.4 GB | 32.6  |          |      |      |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap`  | ~5.7 GB  | 19.1  |          |      |      |
-| Ollama                                 |          |       |          |      |      |
-| LM Studio, MLX engine                  |          |       |          |      |      |
-| SwiftLM                                |          |       |          |      |      |
-| TurboFieldfare, default settings       | 1.42 GB  |       | 21.0     |      |      |
-| slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 25.3     |      |      |
-| slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
-| slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
-| slipstream, 96 of 256 cached           | 6.8 GB   |       |          |      |      |
-| slipstream, 128 of 256 cached          | 9.1 GB   | 27.7  | 32.1     | 20.2 | 19.5 |
-| slipstream, 192 of 256 cached          | 13.6 GB  |       |          |      |      |
-| slipstream, KV resume                  | 1.90 GB  |       |          |      |      |
+| option                          | memory  | 1k   | 3k   | 12k  | 24k  |
+| ------------------------------- | ------- | ---- | ---- | ---- | ---- |
+| mlx-lm, all weights resident    | 21.6 GB |      | 41.2 |      |      |
+| llama.cpp, default              | 16.2 GB | 37.6 | 38.6 | 38.3 | 38.9 |
+| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 22.9 | 22.9 | 22.9 | 23.3 |
+| llama.cpp, that plus `--mmap 0` | 17.2 GB | 22.3 | 20.8 | 22.0 | 20.0 |
+| Ollama                          |         |      |      |      |      |
+| LM Studio, MLX engine           |         |      |      |      |      |
+| SwiftLM                         |         |      |      |      |      |
+| TurboFieldfare, defaults        | 2.0 GB  | 26.1 | 23.8 | 17.2 | 13.0 |
+| TurboFieldfare, 32 of 256       | 3.0 GB  | 28.1 | 25.3 | 17.5 | 13.1 |
+| slipstream, 16 of 256 (default) | 2.5 GB  | 24.8 | 26.5 | 23.7 | 22.0 |
+| slipstream, 32 of 256           | 3.5 GB  | 26.9 | 28.9 | 24.9 | 22.6 |
+| slipstream, 64 of 256           | 5.6 GB  | 27.1 | 30.8 | 23.9 | 22.2 |
+| slipstream, 96 of 256           | 7.8 GB  | 25.6 | 28.7 | 22.6 | 21.3 |
+| slipstream, 128 of 256          | 9.9 GB  | 26.1 | 29.1 | 22.7 | 22.0 |
+| slipstream, 192 of 256          | 14.1 GB | 24.7 | 23.9 | 12.4 | 12.1 |
+| slipstream, KV resume           |         |      |      |      |      |
 
-Caching 128 experts instead of the default 16 is worth 27 percent of
-decode speed, 25.3 to 32.1 tokens per second, for about 7 GB. That is the
-dial.
+The dial saturates early. Going from 16 cached experts to 64 is worth 16
+percent of decode speed at a 3k prompt and costs 3 GB; past that it buys
+nothing, and at 192 it goes sharply negative as the machine runs short of
+memory. On long prompts even the early gain nearly vanishes.
 
 The KV-resume row has no decode figure because it has not been measured.
 Restoring a cache skips prefill, and prefill is also what fills the expert
@@ -98,12 +104,16 @@ cache, so the first tokens after a resume run against an empty one and the
 rate climbs as it fills. A single sustained number would misrepresent
 that, and the honest version needs a curve.
 
-Three caveats. The llama.cpp rows and the under-1k column used prompts of
-a few dozen tokens, so their prefill figures mean little. The ~12k and
-~24k cells generated 96 tokens rather than 512, which understates
-sustained rate; read them as a floor. mlx-lm's prefill is missing because
-its first run also materializes 19 GB of lazily mapped weights, so the
-150 seconds it took is not comparable to a warm row.
+Two caveats. The llama.cpp rows come from llama-bench, which measures
+prefill and generation directly rather than serving a chat, so its numbers
+are a best case rather than a like-for-like request. And mlx-lm was
+measured separately, at 3k only, because its first run also materializes
+19 GB of lazily mapped weights and its peak sits above this machine's GPU
+wired limit; its prefill is left out for the same reason.
+
+Memory is peak physical footprint everywhere except the two llama.cpp rows
+that leave mmap on, where that figure counts almost nothing because the
+weights are file-backed; those two report resident set size instead.
 
 ## Thesis
 
@@ -114,8 +124,9 @@ Three projects each hold one corner of the problem:
   0.3 GB to spare, as the table below shows, and would not fit at all on a
   16 GB Mac.
 - TurboFieldfare streams experts from SSD in bounded memory, and leaves
-  its largest measured gap in prefill: 63.9 seconds for a 2,940-token
-  prompt, against 18.5 here. Its decode is already competitive.
+  its largest measured gaps at length: a 2,940-token prompt takes 42.5
+  seconds to prefill against 17.4 here, and its decode falls to 13.0
+  tokens per second at 24k where this holds 22.0.
 - Hand-optimized and evolution-searched Metal kernels reach near-roofline
   on exactly the ops these runtimes spend their time in, but have no
   runtime to live in.
@@ -139,14 +150,15 @@ the project slipstream forked from, at its default settings:
 | configuration | TTFT | decode | peak memory |
 | --- | --- | --- | --- |
 | mlx-lm, all weights resident | see below | 41.2 tok/s | 21.6 GB |
-| TurboFieldfare, default settings | 63.9 s | 21.0 tok/s | 1.42 GB |
-| slipstream, 16 of 256 cached (default) | 18.5 s | 25.3 tok/s | 1.90 GB |
-| slipstream, 128 of 256 cached | 17.5 s | 32.1 tok/s | 9.1 GB |
+| llama.cpp, default | 3.8 s | 38.6 tok/s | 16.2 GB RSS |
+| TurboFieldfare, default settings | 42.5 s | 23.8 tok/s | 2.0 GB |
+| slipstream, 16 of 256 cached (default) | 17.4 s | 26.5 tok/s | 2.5 GB |
+| slipstream, 64 of 256 cached | 17.4 s | 30.8 tok/s | 5.6 GB |
 | slipstream, resuming a saved KV cache | 0.03 s | | plus a 119 MB file |
 
 The resident row is the tradeoff stated plainly: keeping all 19 GB of
-weights in memory buys roughly twice the decode speed, and costs eleven
-times the memory. It also barely fits. Peak footprint came to 21.6 GB on a
+weights in memory buys about 1.6x the decode speed of the default here,
+and costs nine times the memory. It also barely fits. Peak footprint came to 21.6 GB on a
 machine whose GPU wired limit is 21.3 GB, so there is no headroom left for
 a longer context, a second model, or anything else the machine is doing.
 That row is mlx-lm, which is also the inference substrate oMLX builds on,
@@ -161,40 +173,43 @@ The expert cache is counted in slots, and one slot holds one expert's
 weights for one layer. This model puts 256 experts in each of its 40
 layers at 1.7 MB per expert, so the default 16 slots cap the cache at
 1.1 GB and 128 slots cap it at 9.1 GB. Slots fill only as experts get
-used, so those are ceilings rather than reservations. Going from 16 slots
-to 128, a sixteenth of the experts to half of them, is worth 27 percent of
-decode speed, 25.3 to 32.1 tokens per second, and drops the time spent
-waiting on expert reads from 15.1 ms per token to 4.7 ms.
+used, so those are ceilings rather than reservations.
 
-That number refines a published result rather than reproducing it. The
-MoE-Infinity paper measures expert locality directly and finds that for
-models with around 100 experts, fewer than 5 percent are repeatedly
-activated while decoding a single request.[^locality] The default 16 slots
-are 6.25 percent of this model's 256 experts, so they should already hold
-the experts a request keeps returning to, and a larger cache should buy
-little. It buys 27 percent. The reason is that repeat activation is not
-what costs time here: a token routes to 8 experts in each of 40 layers, so
-320 fetches per token, and the experts a request touches only once still
-have to come off the SSD. Locality decides what a small cache can hold;
-the long tail decides what you wait for.
+The dial is worth less than it looks, and the measurement says so
+plainly. Going from 16 slots to 64 buys 16 percent at a 3k prompt and 1
+percent at 24k; going further buys nothing at any length; and 192 slots
+costs 45 percent at long prompts, where 14 GB of cache leaves too little
+room for the KV cache and the page cache behind an 18 GB model. The drift
+control on that sweep came back 8.4 percent apart, so treat anything
+smaller than that as noise, which most of this table is.
+
+That shape matches a published result. The MoE-Infinity paper measures
+expert locality directly and finds that for models with around 100
+experts, fewer than 5 percent are repeatedly activated while decoding a
+single request.[^locality] Sixteen slots is 6.25 percent of this model's
+256 experts and 64 is 25 percent, which brackets where the curve flattens
+here. A small cache already holds what a request keeps returning to, and
+the long tail it does not hold has to come off the SSD however much room
+you give it.
 
 [^locality]: [MoE-Infinity, arXiv:2401.14361](https://arxiv.org/abs/2401.14361).
     Measured on NVIDIA hardware, not Apple Silicon, so the mechanism
     transfers but the numbers are not this machine's.
 
 Every memory figure here is peak physical footprint, which counts GPU
-allocations that resident set size misses. Resident set size would read
-1.14 GB for both TurboFieldfare and slipstream out of the box, which is
-why it is the wrong number to quote: it is blind to exactly the memory
-this project exists to manage. The 128-slot row was measured 2026-08-01,
-the rest 2026-08-05.
+allocations that resident set size misses. Resident set size is the wrong
+number to quote for this project: it is blind to exactly the memory being
+managed.
 
-Note what the TurboFieldfare row says and does not say. Decode is a tie,
-21.0 against 21.4, so the decode kernels below buy their gains against
-this project's own earlier state rather than against upstream, whose
-default configuration was never the slow part. Upstream also uses **less**
-memory, 1.42 GB against 1.90 GB. What changed is prefill, 63.9 seconds
-down to 18.5, and the KV cache that makes the second run free. Resuming a
+The TurboFieldfare comparison depends entirely on prompt length, and
+quoting one number for it would be misleading. At a 1k prompt upstream is
+5 percent faster. At 3k they are close. At 12k slipstream is 38 percent
+ahead and at 24k it is 69 percent ahead, because upstream decays from 26.1
+to 13.0 tokens per second across that range while slipstream holds 24.8 to
+22.0. That is the decode-attention rewrite below doing what it was built
+to do: it cut the part of decode that grows with context, so it buys
+nothing on a short prompt and a great deal on a long one. Prefill moved
+too, 42.5 seconds down to 17.4 at 3k and 664.8 down to 381.7 at 24k. Resuming a
 cache restores the prompt exactly, byte for byte, but decode then starts
 against a cold expert cache, because prefill is what normally warms it.
 The section below returns to that tradeoff.
