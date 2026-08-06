@@ -273,7 +273,12 @@ public enum OpenAIRequestValidator {
                           "parallel_tool_calls", "unsupported_value")
         }
 
-        let temperature = request.temperature ?? 0.2
+        // Defaults tuned for a coding agent, which is what this server exists
+        // to serve. Greedy by default: an agent that emits a different command
+        // from the same state is harder to debug, and temperature 0 is also
+        // what lets the fused greedy head run (see RawCompletion). Clients
+        // that want sampling still ask for it explicitly.
+        let temperature = request.temperature ?? 0
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
@@ -292,7 +297,10 @@ public enum OpenAIRequestValidator {
             throw invalid("repetition_penalty must be positive",
                           "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        // 8192, not 4096: a single agent turn writing a source file generated
+        // 3,193 tokens in one response on 2026-08-06, and a truncated file is
+        // a failed step that costs a whole retry.
+        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 8192
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
