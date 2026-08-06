@@ -139,7 +139,17 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
         let context = try MetalContext()
-        let runtime = RuntimeConfiguration(forceLogitsHead: true)
+        // Prefill in the largest supported chunk. The CLI computes this per
+        // prompt ("auto"), which the server cannot do because the runtime is
+        // built before any request arrives; but the allowed sizes top out at
+        // 4096, so auto resolves to the maximum for every prompt larger than
+        // that, and the maximum is within one step of auto for the rest.
+        // Leaving this at the struct default of 128 cost 64 s of the 87.8 s a
+        // 2,940-token prompt took through the server, against 36.7 s for the
+        // same work through the CLI (measured 2026-08-06).
+        let runtime = RuntimeConfiguration(
+            prefillChunkTokens: RuntimeConfiguration.allowedPrefillChunkTokens.last!,
+            forceLogitsHead: true)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
