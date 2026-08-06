@@ -41,7 +41,7 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 expertCacheSlots: Int = 16,
                 rdadvise: String = "off",
-                prefillChunk: PrefillChunkChoice = .fixed(128),
+                prefillChunk: PrefillChunkChoice = .auto,
                 kvSnapshot: String? = nil) {
         self.model = model
         self.prompt = prompt
@@ -106,14 +106,18 @@ extension Args {
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
-      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
-                                24, or 32 (default 16). More slots raise the
-                                hit rate but use more memory.
-      --prefill-chunk <n|auto>  Prefill chunk tokens (default 128). Larger
+      --expert-cache-slots <n>  Routed-expert cache slots per layer, one
+                                slot per expert (default 16 of this model's
+                                256). Allowed: 8, 16, 24, 32, 48, 64, 96,
+                                128, 192, 256. More slots raise the hit
+                                rate and cost RAM; measured warm on M5,
+                                16 -> 128 slots is 25.3 -> 32.1 tok/s.
+      --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt. Allowed: 32, 64, 128, 256, 512,
-                                1024, 2048, 4096.
+                                the prompt and is worth ~3.5x on time to
+                                first token. Allowed: 32, 64, 128, 256,
+                                512, 1024, 2048, 4096.
       --kv-snapshot <path>      Whole-state KV snapshot file: saved after a
                                 fresh prefill, restored (skipping prefill)
                                 when the file matches the exact prompt.
@@ -136,7 +140,7 @@ extension Args {
         var quiet = false
         var expertCacheSlots = 16
         var rdadvise = "off"
-        var prefillChunk = PrefillChunkChoice.fixed(128)
+        var prefillChunk = PrefillChunkChoice.auto
         var kvSnapshot: String?
 
         var index = 0

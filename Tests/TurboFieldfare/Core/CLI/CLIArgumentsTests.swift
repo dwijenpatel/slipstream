@@ -107,9 +107,12 @@ import Testing
         }
     }
 
-    @Test func prefillChunkDefaultsToProduction128() throws {
+    /// Default moved from a fixed 128 to auto on 2026-08-05. Measured warm on
+    /// M5: a 2,940-token prompt prefills in 18.5 s under auto against 64.0 s
+    /// at 128, and no caller depended on the fixed size.
+    @Test func prefillChunkDefaultsToAuto() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
-        #expect(arguments.prefillChunk == .fixed(128))
+        #expect(arguments.prefillChunk == .auto)
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1024, 2048, 4096])

@@ -3,8 +3,9 @@
 Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
 near-roofline Metal kernels, and a KV cache that survives the process.
 
-Qwen3.6-35B-A3B generates at 21 tokens per second on a base M5 MacBook, in
-1.9 GB of memory. Its weights are 18 GB. slipstream leaves them on SSD and
+Qwen3.6-35B-A3B generates at 25 tokens per second on a base M5 MacBook, in
+1.9 GB of memory, or 32 with more of the experts cached. Its weights are
+18 GB. slipstream leaves them on SSD and
 streams only the eight experts each token actually routes to, staying
 inside a RAM budget you set, so memory is a dial rather than a number the
 model dictates. Prompts do not have to be paid for twice either: the KV
@@ -61,9 +62,8 @@ Peak memory, and time to first token:
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
 | TurboFieldfare, its defaults | 1.42 GB | | 63.9 s | | |
-| slipstream, its defaults | 1.90 GB | | 64.0 s | | |
-| slipstream, `--prefill-chunk auto` | 1.90 GB | | 18.5 s | | |
-| slipstream, that plus 128 slots | up to 9.1 GB | | 17.5 s | | |
+| slipstream, defaults (16 of 256 experts cached) | 1.90 GB | | 18.5 s | | |
+| slipstream, half the experts cached | up to 9.1 GB | | 17.5 s | | |
 | slipstream, KV resume | 1.90 GB | | 0.03 s | | |
 
 Sustained decode, in tokens per second:
@@ -77,13 +77,13 @@ Sustained decode, in tokens per second:
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
 | TurboFieldfare, its defaults | 1.42 GB | | 21.0 | | |
-| slipstream, its defaults | 1.90 GB | | 22.1 | | |
-| slipstream, `--prefill-chunk auto` | 1.90 GB | | 21.4 | | |
-| slipstream, that plus 128 slots | up to 9.1 GB | 27.7 | ~25 | 20.2 | 19.5 |
+| slipstream, defaults (16 of 256 experts cached) | 1.90 GB | | 25.3 | | |
+| slipstream, half the experts cached | up to 9.1 GB | 27.7 | 32.1 | 20.2 | 19.5 |
 | slipstream, KV resume | 1.90 GB | | ramps from cold | | |
 
-`--prefill-chunk auto` is the single largest lever in either table, worth
-3.5x on time to first token, and it is not yet the default. Turn it on.
+Caching half the experts instead of the default sixteenth is worth 27
+percent of decode speed, 25.3 to 32.1 tokens per second, and costs about
+7 GB. That is the dial.
 
 Three caveats. The llama.cpp rows and the under-1k column used prompts of
 a few dozen tokens, so their prefill figures mean little. The ~12k and
@@ -127,8 +127,8 @@ the project slipstream forked from, run at its own defaults:
 | --- | --- | --- | --- |
 | mlx-lm, all weights resident | see below | 41.2 tok/s | 21.6 GB |
 | TurboFieldfare, its defaults | 63.9 s | 21.0 tok/s | 1.42 GB |
-| slipstream, out of the box | 18.5 s | 21.4 tok/s | 1.90 GB |
-| slipstream, expert cache raised to 128 slots | 17.5 s | ~25 tok/s | up to 9.1 GB |
+| slipstream, its defaults | 18.5 s | 25.3 tok/s | 1.90 GB |
+| slipstream, half the experts cached | 17.5 s | 32.1 tok/s | up to 9.1 GB |
 | slipstream, resuming a saved KV cache | 0.03 s | ramps from cold | plus a 119 MB file |
 
 The resident row is the tradeoff stated plainly: keeping all 19 GB of
@@ -148,20 +148,22 @@ The expert cache is counted in slots, and one slot holds one expert's
 weights for one layer. This model puts 256 experts in each of its 40
 layers at 1.7 MB per expert, so the default 16 slots cap the cache at
 1.1 GB and 128 slots cap it at 9.1 GB. Slots fill only as experts get
-used, so those are ceilings rather than reservations. Eight times the
-memory buys under 10 percent more decode speed here, which is the honest
-shape of the dial: on this model it decides whether you can run at all far
-more than it decides how fast.
+used, so those are ceilings rather than reservations. Going from 16 slots
+to 128, a sixteenth of the experts to half of them, is worth 27 percent of
+decode speed, 25.3 to 32.1 tokens per second, and drops the time spent
+waiting on expert reads from 15.1 ms per token to 4.7 ms.
 
-That flatness is not a quirk of this implementation. The MoE-Infinity
-paper measures expert locality directly and finds that for models with
-around 100 experts, fewer than 5 percent are repeatedly activated while
-decoding a single request, with the reuse skew concentrated inside one
-sequence and absent across requests.[^locality] The default 16 slots are
-6.25 percent of this model's 256 experts, which lands right on that
-threshold. Their measurement and this curve agree from opposite
-directions: a small cache already holds the experts a request keeps
-coming back to, so the rest of the memory buys very little.
+That number refines a published result rather than reproducing it. The
+MoE-Infinity paper measures expert locality directly and finds that for
+models with around 100 experts, fewer than 5 percent are repeatedly
+activated while decoding a single request.[^locality] The default 16 slots
+are 6.25 percent of this model's 256 experts, so they should already hold
+the experts a request keeps returning to, and a larger cache should buy
+little. It buys 27 percent. The reason is that repeat activation is not
+what costs time here: a token routes to 8 experts in each of 40 layers, so
+320 fetches per token, and the experts a request touches only once still
+have to come off the SSD. Locality decides what a small cache can hold;
+the long tail decides what you wait for.
 
 [^locality]: [MoE-Infinity, arXiv:2401.14361](https://arxiv.org/abs/2401.14361).
     Measured on NVIDIA hardware, not Apple Silicon, so the mechanism
