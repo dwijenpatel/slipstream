@@ -61,24 +61,29 @@ Peak memory, and time to first token:
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
 | TurboFieldfare, its defaults | 1.42 GB | | 63.9 s | | |
-| slipstream, out of the box | 1.90 GB | | 18.5 s | | |
-| slipstream, 128 slots | up to 9.1 GB | | 17.5 s | | |
+| slipstream, its defaults | 1.90 GB | | 64.0 s | | |
+| slipstream, `--prefill-chunk auto` | 1.90 GB | | 18.5 s | | |
+| slipstream, that plus 128 slots | up to 9.1 GB | | 17.5 s | | |
 | slipstream, KV resume | 1.90 GB | | 0.03 s | | |
 
 Sustained decode, in tokens per second:
 
-| option | <1k | ~3k | ~12k | ~24k |
-| --- | --- | --- | --- | --- |
-| mlx-lm, resident | | 41.2 | | |
-| llama.cpp, default | 32.6 | | | |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap` | 19.1 | | | |
-| Ollama | | | | |
-| LM Studio, MLX engine | | | | |
-| SwiftLM | | | | |
-| TurboFieldfare, its defaults | | 21.0 | | |
-| slipstream, out of the box | | 21.4 | | |
-| slipstream, 128 slots | 27.7 | ~25 | 20.2 | 19.5 |
-| slipstream, KV resume | | ramps from cold | | |
+| option | peak RAM | <1k | ~3k | ~12k | ~24k |
+| --- | --- | --- | --- | --- | --- |
+| mlx-lm, resident | 21.6 GB | | 41.2 | | |
+| llama.cpp, default | ~17.4 GB | 32.6 | | | |
+| llama.cpp, `--n-cpu-moe 32 --no-mmap` | ~5.7 GB | 19.1 | | | |
+| Ollama | | | | | |
+| LM Studio, MLX engine | | | | | |
+| SwiftLM | | | | | |
+| TurboFieldfare, its defaults | 1.42 GB | | 21.0 | | |
+| slipstream, its defaults | 1.90 GB | | 22.1 | | |
+| slipstream, `--prefill-chunk auto` | 1.90 GB | | 21.4 | | |
+| slipstream, that plus 128 slots | up to 9.1 GB | 27.7 | ~25 | 20.2 | 19.5 |
+| slipstream, KV resume | 1.90 GB | | ramps from cold | | |
+
+`--prefill-chunk auto` is the single largest lever in either table, worth
+3.5x on time to first token, and it is not yet the default. Turn it on.
 
 Three caveats. The llama.cpp rows and the under-1k column used prompts of
 a few dozen tokens, so their prefill figures mean little. The ~12k and
