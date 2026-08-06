@@ -3,14 +3,19 @@
 Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
 near-roofline Metal kernels, and a KV cache that survives the process.
 
-Qwen3.6-35B-A3B generates at 26.5 tokens per second on a base M5 MacBook in
-2.5 GB of memory, or 30.8 in 5.6 GB. Its weights are 18 GB.
+Qwen3.6-35B-A3B generates at 24.9 tokens per second on a base M5 MacBook
+against a 12,000-token prompt, in 3.5 GB of memory. Its weights are 18 GB.
 slipstream leaves them on SSD and streams only the eight experts each
-token actually routes to, staying inside a RAM budget you set, so memory is a dial rather than a number the
-model dictates. Prompts do not have to be paid for twice either: the KV
-cache persists to disk, so a 2,940-token prompt that costs 17.4 seconds to
-read the first time comes back in 0.03 seconds, byte for byte, on every run
-after. Doing this without giving up speed is the point of the kernels
+token actually routes to, staying inside a RAM budget you set, so the
+footprint is one you choose rather than one the model dictates. Choose it
+low. Past roughly 3 GB, more memory buys nothing at any prompt length
+measured here, and at 14 GB it costs nearly half the decode rate; the
+measurements below say so plainly, and the reason is that a small expert
+cache already holds what a request keeps returning to. Prompts do not have
+to be paid for twice either: the KV cache persists to disk, so a
+2,940-token prompt that costs 17.4 seconds to read the first time comes
+back in 0.03 seconds, byte for byte, on every run after. Doing this
+without giving up speed is the point of the kernels
 underneath, which are hand-written Metal tuned against what this chip
 delivers rather than what its spec sheet claims: decode attention and the
 output head each run at better than 90 percent of its real memory
@@ -93,7 +98,7 @@ Sustained decode, in tokens per second:
 | SwiftLM                         |         |      |      |      |      |
 | slipstream, KV resume           |         |      |      |      |      |
 
-The dial saturates early. Going from 16 cached experts to 64 is worth 16
+The budget saturates early. Going from 16 cached experts to 64 is worth 16
 percent of decode speed at a 3k prompt and costs 3 GB; past that it buys
 nothing, and at 192 it goes sharply negative as the machine runs short of
 memory. On long prompts even the early gain nearly vanishes.
@@ -175,7 +180,7 @@ layers at 1.7 MB per expert, so the default 16 slots cap the cache at
 1.1 GB and 128 slots cap it at 9.1 GB. Slots fill only as experts get
 used, so those are ceilings rather than reservations.
 
-The dial is worth less than it looks, and the measurement says so
+The budget is worth less than it looks, and the measurement says so
 plainly. Going from 16 slots to 64 buys 16 percent at a 3k prompt and 1
 percent at 24k; going further buys nothing at any length; and 192 slots
 costs 45 percent at long prompts, where 14 GB of cache leaves too little
