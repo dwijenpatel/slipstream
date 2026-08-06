@@ -7,19 +7,18 @@ Qwen3.6-35B-A3B generates at 24.9 tokens per second on a base M5 MacBook
 against a 12,000-token prompt, in 3.5 GB of memory. Its weights are 18 GB.
 slipstream leaves them on SSD and streams only the eight experts each
 token actually routes to, staying inside a RAM budget you set, so the
-footprint is one you choose rather than one the model dictates. Choose it
-low. Past roughly 3 GB, more memory buys nothing at any prompt length
-measured here, and at 14 GB it costs nearly half the decode rate; the
-measurements below say so plainly, and the reason is that a small expert
-cache already holds what a request keeps returning to. Prompts do not have
-to be paid for twice either: the KV cache persists to disk, so a
+memory footprint is one you choose rather than one the model dictates.
+Choose it low. Past roughly 3 GB, more memory buys nothing at any prompt
+length measured here, and at 14 GB it costs nearly half the decode rate;
+the measurements below say so plainly, and the reason is that a small
+expert cache already holds what a request keeps returning to. Prompts do
+not have to be paid for twice either: the KV cache persists to disk, so a
 2,940-token prompt that costs 17.4 seconds to read the first time comes
 back in 0.03 seconds, byte for byte, on every run after. Doing this
-without giving up speed is the point of the kernels
-underneath, which are hand-written Metal tuned against what this chip
-delivers rather than what its spec sheet claims: decode attention and the
-output head each run at better than 90 percent of its real memory
-bandwidth.
+without giving up speed is the point of the kernels underneath, which are
+hand-written Metal tuned against what this chip delivers rather than what
+its spec sheet claims: decode attention and the output head each run at
+better than 90 percent of its real memory bandwidth.
 
 ## Running a good coding model on a Mac, like Qwen3.6
 
