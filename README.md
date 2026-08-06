@@ -21,7 +21,9 @@ bandwidth.
 Three projects each hold one corner of the problem:
 
 - Resident-weight runtimes (mlx-lm, oMLX) are fast until the model does not
-  fit, then stop working entirely.
+  fit, then stop working entirely. This one fits on this machine with
+  0.3 GB to spare, as the table below shows, and would not fit at all on a
+  16 GB Mac.
 - TurboFieldfare streams experts from SSD in bounded memory, but leaves
   measured factors of 2 to 5x on the table in decode and prefill.
 - Hand-optimized and evolution-searched Metal kernels reach near-roofline
@@ -40,16 +42,30 @@ days. Models age out; the pipeline compounds. See `playbook/`.
 
 ## Measured state (M5, 10-core GPU, 24 GB)
 
-Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt.
-The first row is TurboFieldfare, the project slipstream forked from, run at
-its own defaults:
+Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt,
+every row on the same machine and the same prompt file. TurboFieldfare is
+the project slipstream forked from, run at its own defaults:
 
 | configuration | TTFT | decode | peak memory |
 | --- | --- | --- | --- |
+| mlx-lm, all weights resident | see below | 41.2 tok/s | 21.6 GB |
 | TurboFieldfare, its defaults | 63.3 s | ~18 tok/s | 1.13 GB RSS |
 | slipstream, out of the box | 18.5 s | 21.4 tok/s | 1.90 GB |
 | slipstream, expert cache raised to 128 slots | 17.5 s | ~25 tok/s | up to 9.1 GB |
 | slipstream, resuming a saved KV cache | 0.03 s | ramps from cold | plus a 119 MB file |
+
+The resident row is the tradeoff stated plainly: keeping all 19 GB of
+weights in memory buys roughly twice the decode speed, and costs eleven
+times the memory. It also barely fits. Peak footprint came to 21.6 GB on a
+machine whose GPU wired limit is 21.3 GB, so there is no headroom left for
+a longer context, a second model, or anything else the machine is doing.
+That row is mlx-lm, which is also the inference substrate oMLX builds on,
+so a single-stream oMLX number would land near it; oMLX's own additions,
+continuous batching and tiered KV caching, pay off across concurrent
+requests rather than one. Its TTFT is left out because that run also
+materialized the lazily mapped weights on first touch, which the warm
+slipstream rows never pay, and quoting it as prefill would flatter
+slipstream by about eight times.
 
 The expert cache is counted in slots, and one slot holds one expert's
 weights for one layer. This model puts 256 experts in each of its 40
