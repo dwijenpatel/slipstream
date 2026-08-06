@@ -54,51 +54,81 @@ size misses. Measured the same way, slipstream's resident set size is
 1.14 GB. The 128-slot and upstream rows were measured 2026-08-01, the rest
 2026-08-05. Resuming a KV cache restores the prompt exactly, byte for byte,
 but decode then starts against a cold expert cache, because prefill is
-what normally warms it. That tradeoff is item 4 in the roadmap below.
+what normally warms it. The section below returns to that tradeoff.
 
-Decode phase split at 128 cache slots (per token, 40.7 ms total):
-scheduling gaps ~9 ms, expert I/O await 7.8 ms, expert FFN 6.5 ms,
-GDN attention 6.1 ms, full attention 6.1 ms, head 2.4 ms, tail 1.3 ms.
-The full-attention sdpa runs at ~24 percent of the memory-bandwidth
-ceiling on its context-dependent part and is the only term that grows
-with context. That measurement, not intuition, sets the roadmap below.
+Where a token's 40.7 ms went, at 128 cache slots: 9 ms waiting for the GPU
+between layers, 7.8 ms awaiting expert reads from SSD, 6.5 ms in the expert
+feed-forward, 6.1 ms in linear attention, 6.1 ms in full attention, 2.4 ms
+in the output head, 1.3 ms in the tail. The model is a hybrid, so 30 of its
+40 layers use a recurrent linear attention that keeps no per-token cache
+and 10 use ordinary attention that does. Only the second kind grows with
+context, which is why it was the first thing rewritten. Everything below
+follows from this split rather than from intuition.
 
-## Roadmap (value order, all priced by measurement)
+## What is built, and what it measured
 
-1. DONE 2026-08-01: GQA split-KV decode attention (full-attn GPU time
-   2.49x faster, KV scan ~90 percent of BW ceiling, context term cut
-   5.4x, decode 24.9 to 26.8 tok/s at 3k)
-2. MEASURED, folded into 3 (2026-08-01): the ~9 ms/token gap is 40
-   irreducible ~207 us waitUntilCompleted round trips (router
-   readback); a GPU-fence spin bypass is bit-identical but slower.
-   The wait cannot shrink; work must overlap into it.
-3. BUILT + measured 2026-08-01: predicted routing (layer L+1 router
-   on layer L state) = 81.9 percent recall@top-8; env-gated prefetch
-   cuts I/O await 55 percent but is NET SLOWER on resident-class
-   models (bandwidth-saturated unified memory re-collects the bytes).
-   Default off; re-test in the streaming regime (model >> RAM) where
-   the GPU is genuinely idle during disk waits
-4. SHIPPED v1 2026-08-01: --kv-snapshot exact-prefix resume. Reload
-   beats recompute 588x on prefill (17.65 s -> 0.03 s, byte-identical,
-   119 MB @3k tokens). Found tradeoff: prefill doubled as the expert
-   cache warmer, so post-restore decode ramps from cold; background
-   expert sweep after restore is the queued mitigation. Partial-prefix
-   block reuse (the oMLX-blueprint hard part) remains open.
-5. MEASURED 2026-08-04, stage-1 decode polish mostly EXHAUSTED: the
-   output head already runs at ~93 percent of the bandwidth ceiling
-   (248k int4 vocab, 2.24 ms floor vs 2.4 measured; no kernel prize),
-   and command-buffer merging (routed-FFN folded into next cb1, head
-   into the final carry; 41 fewer commits + 1 fewer sync per token) is
-   bit-identical but only ~0-2 percent, within noise: the 9 ms/token
-   gap is wake latency on the one irreducible wait per layer, which
-   only multi-token (speculative) decoding can amortize. Merge kept
-   (default on; TURBO_FIELDFARE_NO_CB_MERGE=1 restores the old path).
-   Speculative decoding is confirmed as the only remaining large
-   decode lever: draft model + batched verify + GDN state
-   checkpoint/replay via the chunked kernels.
-6. Memory-budget dial: one flag that sets expert-cache slots, prefill
-   chunk, and KV policy together
-7. Playbook automation until a new model is days, not weeks
+Each item below was priced by measurement before and after, and the
+negative results are kept because they are the ones that redirected the
+work.
+
+**Decode attention, rewritten around grouped-query attention.** This model
+gives 16 query heads only 2 key/value heads, so the old kernel re-read the
+same keys and values once per query head. The replacement splits the scan
+across threadgroups and shares each read. The attention branch runs 2.49x
+faster, reads keys and values at about 90 percent of the memory-bandwidth
+ceiling, and the part of decode that grows with context shrank by 5.4x.
+
+**The per-layer stall was measured, and it cannot be removed.** Every layer
+sends its expert-routing choice back to the CPU, which then fetches those
+experts. That round trip costs about 207 microseconds of wake latency, 40
+times per token, or roughly 9 ms of every token. Replacing the wait with a
+GPU fence and a CPU spin produced bit-identical output and ran 15 percent
+slower, because the GPU's writes only become visible to the CPU around the
+same boundary anyway. The wait is a floor. Useful work has to move into it
+rather than around it.
+
+**Routing can be predicted a layer ahead, but prefetching on it does not
+pay here.** Running the next layer's router against the current layer's
+state picks 81.9 percent of the experts that layer will actually want.
+Prefetching on that prediction cut disk-wait time by 55 percent and still
+made decode slower overall: on a machine whose memory bus is already
+saturated, the prefetched bytes simply get collected twice. It ships off by
+default and is worth revisiting when a model is far larger than RAM and the
+GPU is genuinely idle during disk reads.
+
+**The KV cache survives the process.** `--kv-snapshot` writes the cache to
+disk and reloads it, turning an 18-second prefill into 0.03 seconds for the
+same prompt with byte-identical output, at a cost of 119 MB per 3,000
+tokens. The tradeoff found on the way: prefill had been quietly doing a
+second job, warming the expert cache, so decode after a resume starts cold.
+A background expert sweep after restore is the queued fix. Reusing a cache
+across prompts that share only a prefix is still open.
+
+**Single-token decode is close to its floor.** The output head already runs
+at about 93 percent of the bandwidth ceiling, so there is no kernel prize
+left there. Merging command buffers to cut 41 of the per-token
+synchronization boundaries turned out bit-identical and worth under 2
+percent, inside the noise. What remains is the 9 ms wake latency above, and
+the only way to amortize it is to make one forward pass emit more than one
+token.
+
+## What is next
+
+**Speculative decoding**, which is the only large decode lever left. The
+machinery works and is measured: it drafts, verifies, and repairs its own
+state correctly, and on code it accepts 33.9 percent of drafted tokens for
+3.57 emitted tokens per round. It is still slower than plain decode,
+because verifying k tokens at once needs matmul kernels that read weights
+once for the whole batch, and the ones available here degrade to roughly k
+separate passes below 32 rows. Two kernels close that gap. Design and
+measurements are in `docs/SPEC_DECODE.md`.
+
+**One memory budget flag** that sets expert-cache slots, prefill chunk size,
+and KV policy together, instead of three knobs a user has to reason about
+separately.
+
+**Playbook automation**, until onboarding a newly released model is a matter
+of days rather than weeks.
 
 ## Lineage and attribution
 
@@ -110,9 +140,11 @@ with context. That measurement, not intuition, sets the roadmap below.
 - Design ideas credited to [oMLX](https://github.com/jundot/omlx)
   (Apache 2.0): content-addressed KV block persistence, macOS memory
   enforcement, NAX-metallib packaging. Ideas, not code, so far.
-- Kernels and measurement methodology come from a companion research
-  repo (measurement discipline, roofline ceilings, evolutionary kernel
-  search).
+- Kernels and measurement methodology come from
+  [gpu-kernel](https://github.com/dwijenpatel/gpu-kernel), a companion
+  research repo. Its `METHODOLOGY.md` is the reason the numbers above
+  carry the caveats they do: it records how each measurement technique
+  was found wrong, and what the error cost.
 
 ## Building
 
