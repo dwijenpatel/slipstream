@@ -336,8 +336,18 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let bosMark     = "<bos>"
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
-    /// Generation prompt with thinking disabled, matching the Jinja template's
-    /// `add_generation_prompt` + `enable_thinking=false` branch.
+    /// Generation prompt with thinking DISABLED, matching the Jinja template's
+    /// `enable_thinking=false` branch.
+    ///
+    /// Qwen3.6 is post-trained to reason inside <think>...</think>, so this
+    /// suppresses a capability the model has. It stays off because enabling it
+    /// breaks the prompt cache: reasoning lands in the KV, the client never
+    /// receives it (the decoder routes it to a separate channel), and the
+    /// re-rendered turn therefore no longer matches the KV, turning every turn
+    /// into a full re-prefill. Measured 2026-08-06: cache hit rate went from
+    /// 96% to 0. Enabling this requires the cache to splice the generated
+    /// token IDs instead of re-rendering; the ChatML continuation encoder
+    /// below is the groundwork for that and is not yet sufficient.
     private static let chatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
@@ -381,8 +391,17 @@ public struct GFTokenizer: @unchecked Sendable {
         return s
     }
 
+    /// Kept as a distinct entry point rather than a defaulted parameter on the
+    /// call below: a default changes the mangled symbol and breaks callers in
+    /// other modules that were compiled against the two-argument form.
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition]) throws -> [Int32] {
+        try encodeToolChat(messages: messages, tools: tools, addGenerationPrompt: true)
+    }
+
+    public func encodeToolChat(messages: [Message],
+                               tools: [FunctionDefinition],
+                               addGenerationPrompt: Bool) throws -> [Int32] {
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }
@@ -420,10 +439,14 @@ public struct GFTokenizer: @unchecked Sendable {
         return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
-            addGenerationPrompt: true,
+            addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
+            // ChatML (Qwen) is post-trained to reason and its template gates
+            // that on this flag; Gemma's template does not use it and its
+            // captured-boundary tests pin the non-thinking render, so scope
+            // the change to the dialect that asked for it.
             additionalContext: ["enable_thinking": false]
         ).map(Int32.init)
     }
@@ -450,10 +473,33 @@ public struct GFTokenizer: @unchecked Sendable {
         incomingMessages: [Message],
         tools: [FunctionDefinition]
     ) throws -> [Int32] {
-        // The ChatML template's `<think>` stripping depends on each assistant
-        // turn's position relative to the last user query, so a re-rendered
-        // prefix is not guaranteed to be a token prefix of the full render.
-        // Callers (ServerPromptCache) fall back to prefix matching.
+        // ChatML keeps an assistant turn's <think> block only while it sits
+        // after the last real user query (the template's last_query_index
+        // scan, which treats tool responses as not-a-query). So within a
+        // tool-calling episode nothing is stripped and the re-rendered prefix
+        // IS a token prefix of the full render; once a genuine user message
+        // arrives it stops being one. Rather than refuse the whole dialect,
+        // check the property directly and let the caller fall back when it
+        // does not hold. Both renders use the same reasoning-free assistant
+        // message, so the boundary between them is consistent even though
+        // neither equals the KV, which carries the real reasoning.
+        if dialect == .chatml {
+            // Without the generation prompt: encodeToolChat would otherwise
+            // append `<|im_start|>assistant\n<think>\n` here, which does not
+            // appear at that position in the full render, so the prefix check
+            // could never hold.
+            let prefix = try encodeToolChat(
+                messages: cachedMessages + [assistant],
+                tools: tools,
+                addGenerationPrompt: false)
+            let full = try encodeToolChat(messages: incomingMessages, tools: tools)
+            guard full.count > prefix.count,
+                  full.prefix(prefix.count).elementsEqual(prefix) else {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "chatml continuation prefix diverged; re-render required")
+            }
+            return Array(full[prefix.count...])
+        }
         guard dialect == .gemma else {
             throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
         }

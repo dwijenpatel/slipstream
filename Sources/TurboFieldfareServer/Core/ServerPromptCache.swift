@@ -67,9 +67,13 @@ struct ServerPromptCache: Sendable {
                 name: $0.name,
                 arguments: $0.arguments)
         }
+        // Keep the content even alongside tool calls. Discarding it made
+        // assistantMatches unable to compare it, so it demanded both sides be
+        // empty and every turn carrying prose AND a tool call fell through to
+        // a full re-prefill.
         let assistant = GFTokenizer.Message(
             role: .assistant,
-            content: calls.isEmpty ? content : nil,
+            content: content.isEmpty ? nil : content,
             toolCalls: historicalCalls)
         entry = ServerPromptCacheEntry(
             domain: domain,
@@ -141,11 +145,10 @@ struct ServerPromptCache: Sendable {
               incoming.name == cached.name else {
             return false
         }
-        if !cached.toolCalls.isEmpty {
-            return (incoming.content ?? "").isEmpty
-                && (cached.content ?? "").isEmpty
-        }
-        return incoming.content == cached.content
+        // Compare content in both cases. A turn may legitimately carry prose
+        // and a tool call together, and with thinking enabled that is the
+        // common shape rather than the exception.
+        return (incoming.content ?? "") == (cached.content ?? "")
     }
 
     private func matchTextContinuation(
