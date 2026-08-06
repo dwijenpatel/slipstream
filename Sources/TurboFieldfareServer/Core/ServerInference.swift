@@ -359,6 +359,21 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
+        // One line per request, so a long agent run measures itself instead of
+        // being reconstructed afterwards from trajectory timestamps. Written
+        // to stderr, which is where the server's other diagnostics go.
+        let ttft = result.prefillSeconds
+        let decodeRate = result.decodeSeconds > 0
+            ? Double(result.newTokens) / result.decodeSeconds
+            : 0
+        let prefillRate = ttft > 0 ? Double(result.computedPrefillTokens) / ttft : 0
+        FileHandle.standardError.write(Data((
+            "request prompt=\(result.prefillTokens) cached=\(result.cachedPromptTokens) "
+            + "new_prompt=\(result.computedPrefillTokens) completion=\(result.newTokens) "
+            + String(format: "ttft=%.2fs prefill=%.1ftok/s decode=%.1ftok/s total=%.2fs",
+                     ttft, prefillRate, decodeRate, ttft + result.decodeSeconds)
+            + " stop=\(reason)\n").utf8))
+
         if promptCacheMode == .singlePrefix {
             promptCache.publish(
                 domain: promptCacheDomain,
