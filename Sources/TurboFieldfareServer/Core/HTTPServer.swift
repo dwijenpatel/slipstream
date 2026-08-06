@@ -772,12 +772,16 @@ private final class ChildChannelRegistry: Sendable {
             $0.shuttingDown = true
             return Array($0.channels.values)
         }
-        for channel in channels {
-            try? await channel.close().get()
-        }
+        // Cancel BEFORE closing. Closing first and awaiting each channel left
+        // shutdown blocked on `await task.value` for a generation that had not
+        // been told to stop, which is why SIGTERM used to need a follow-up
+        // SIGKILL during a long prefill (2026-08-05).
         let tasks = state.withLock { Array($0.tasks.values) }
         for task in tasks {
             task.cancel()
+        }
+        for channel in channels {
+            try? await channel.close().get()
         }
         for task in tasks {
             await task.value
