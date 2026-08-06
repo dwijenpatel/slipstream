@@ -3,17 +3,18 @@
 Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
 near-roofline Metal kernels, and a KV cache that survives the process.
 
-Qwen3.6-35B-A3B generates at 21 tokens per second on a base M5 MacBook and
-peaks at 1.9 GB of memory. Its weights are 18 GB. slipstream leaves them on
-SSD and streams only the eight experts each token routes to, through a
-bounded cache you size yourself, so memory becomes a dial rather than an
-architecture decision. A 2,940-token prompt takes 18.5 seconds to prefill
-the first time and 0.03 seconds on every run after that, because the KV
-cache persists to disk and reloads byte for byte. Underneath, the kernels
-are scored against this machine's measured ceilings rather than its spec
-sheet, which overstates memory bandwidth by 27 percent: decode attention
-now reads KV at about 90 percent of the real ceiling, and the output head
-at 93.
+Qwen3.6-35B-A3B generates at 21 tokens per second on a base M5 MacBook, in
+1.9 GB of memory. Its weights are 18 GB. slipstream leaves them on SSD and
+streams only the eight experts each token actually routes to, through a
+cache you size yourself, so memory is a dial you set rather than a number
+the model dictates. Prompts do not have to be paid for twice either: the KV
+cache persists to disk, so a 2,940-token prompt that costs 18.5 seconds to
+read the first time comes back in 0.03 seconds, byte for byte, on every run
+after. Doing this without giving up speed is the point of the kernels
+underneath, which are hand-written Metal tuned against what this chip
+delivers rather than what its spec sheet claims: decode attention and the
+output head each run at better than 90 percent of its real memory
+bandwidth.
 
 ## Thesis
 
