@@ -16,6 +16,57 @@ delivers rather than what its spec sheet claims: decode attention and the
 output head each run at better than 90 percent of its real memory
 bandwidth.
 
+## Running a good coding model on a Mac, like Qwen3.6
+
+**The field is three engines and a long tail.** llama.cpp runs GGUF, and
+Ollama, LM Studio, Jan, KoboldCpp, and GPT4All all wrap it. MLX is Apple's
+framework: mlx-lm is the reference library, oMLX a server built on it, and
+LM Studio ships an MLX engine of its own. Expert streaming keeps weights on
+SSD and fetches only what each token routes to: TurboFieldfare, slipstream,
+SwiftLM. The tail is MLC-LLM, vLLM, llamafile, text-generation-webui,
+transformers on MPS, and the offload projects born on CUDA: ktransformers,
+PowerInfer, Fiddler, MoE-Infinity, AirLLM.
+
+**The tail rules itself out.** MLC-LLM compiles ahead of time and shows no
+Qwen3.6 support. vLLM's Metal plugin is young and unverified on this
+architecture. transformers on MPS demands every weight resident.
+llamafile is CPU-first and stagnant. text-generation-webui closed its MLX
+pull request and stays GGUF-only. Of the offload projects, ktransformers
+has no Apple Silicon build, PowerInfer runs CPU-only on Mac, PowerInfer-2
+never shipped code, and Fiddler and MoE-Infinity dodge a PCIe bottleneck
+that unified memory does not have. AirLLM does run on macOS and does cut
+memory hard, at 50 to 200 times slower than an API call.
+
+**Three contenders, one tradeoff each.** Take **mlx-lm**, or LM Studio's
+MLX engine over it, for speed you pay for in memory. Take **llama.cpp**,
+or Ollama over it, for the widest model and quantization choice, and note
+it has two distinct configurations: resident by default, or expert tensors
+paged from SSD once you pass both `--n-cpu-moe` and `--no-mmap`. Take
+**slipstream**, TurboFieldfare, or SwiftLM when memory is what binds.
+
+Same machine, same model, same prompt file. Blank cells are unmeasured,
+not unmeasurable.
+
+| option | RAM | under 1k | ~3k | ~12k | ~24k |
+| --- | --- | --- | --- | --- | --- |
+| mlx-lm, resident | 21.6 GB | | 41.2 tok/s | | |
+| llama.cpp, default | ~17.4 GB | 0.7 s, 32.6 tok/s | | | |
+| llama.cpp, `--n-cpu-moe 32 --no-mmap` | ~5.7 GB | 2.6 s, 19.1 tok/s | | | |
+| Ollama | | | | | |
+| LM Studio, MLX engine | | | | | |
+| SwiftLM | | | | | |
+| slipstream, out of the box | 1.90 GB | | 18.5 s, 21.4 tok/s | | |
+| slipstream, 128 slots | up to 9.1 GB | 27.7 tok/s | 17.5 s, ~25 tok/s | 20.2 tok/s | 19.5 tok/s |
+| slipstream, KV resume | 1.90 GB | | 0.03 s | | |
+
+Cells give time to first token and sustained decode where both are
+comparable, decode alone where prefill is not. Three caveats. The
+llama.cpp rows and the under-1k column used prompts of a few dozen tokens,
+so their prefill figures mean little. The ~12k and ~24k slipstream cells
+generated 96 tokens rather than 512, which understates sustained rate;
+read them as a floor. mlx-lm's prefill is absent because its first run also
+materializes 19 GB of lazily mapped weights.
+
 ## Thesis
 
 Three projects each hold one corner of the problem:
@@ -107,69 +158,6 @@ in the output head, 1.3 ms in the tail. The model is a hybrid, so 30 of its
 and 10 use ordinary attention that does. Only the second kind grows with
 context, which is why it was the first thing rewritten. Everything below
 follows from this split rather than from intuition.
-
-## If you just want to run a coding model on your Mac
-
-slipstream is one option among several, and for many people it is not the
-right one. Here is the whole field, and how it narrows.
-
-**There are three engines, not a dozen tools.** Most names in this space
-are front ends over the same three. **llama.cpp** runs GGUF files and is
-what Ollama, LM Studio, Jan, KoboldCpp, and GPT4All use underneath. **MLX**
-is Apple's array framework; mlx-lm is the reference LLM library on top of
-it, oMLX is a third-party server built on that, and LM Studio ships an MLX
-engine alongside its llama.cpp one. **Expert streaming** is the third
-approach, which keeps weights on SSD and fetches only what each token
-needs; TurboFieldfare, slipstream, and SwiftLM live here.
-
-**Rule out, with reasons.** MLC-LLM compiles models ahead of time, which
-makes it slow to adopt new architectures, and no evidence of Qwen3.6's
-hybrid attention support turned up. vLLM is CUDA-first; its Metal plugin
-is young and unverified for this architecture. Hugging Face transformers
-on the MPS backend needs every weight resident with no streaming path, so
-it is the worst fit here. llamafile is CPU-first and looks stagnant.
-text-generation-webui closed its MLX pull request and stays GGUF-only on
-Mac. On the memory-saving side, ktransformers has no Apple Silicon support
-at all, PowerInfer runs CPU-only on Mac with Metal still on its roadmap,
-PowerInfer-2 never shipped code, and Fiddler and MoE-Infinity are built
-around a PCIe bottleneck that unified memory does not have. AirLLM does
-run on macOS and does cut memory hard, but independent testing puts it 50
-to 200 times slower than an API call, which is a different activity from
-interactive use.
-
-**What is left.** mlx-lm, or LM Studio's MLX engine as a GUI over it, when
-you want the most speed and can spend the memory. llama.cpp, or Ollama and
-LM Studio over it, when you want the widest model and quantization
-selection. slipstream, TurboFieldfare, or SwiftLM when memory is the
-binding constraint. Ollama's own MLX backend is in preview and may fold
-the first two together.
-
-### Measured, and still mostly blank
-
-Same machine, same model, same prompt file. Empty cells are unmeasured
-rather than unmeasurable, and filling them is queued work.
-
-| option | under 1k | ~3k | ~12k | ~24k |
-| --- | --- | --- | --- | --- |
-| mlx-lm, resident | | 41.2 tok/s | | |
-| llama.cpp, default (mmap) | 0.7 s, 32.6 tok/s | | | |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap` | 2.6 s, 19.1 tok/s | | | |
-| Ollama | | | | |
-| LM Studio, MLX engine | | | | |
-| SwiftLM | | | | |
-| slipstream, out of the box | | 18.5 s, 21.4 tok/s | | |
-| slipstream, 128 slots | 27.7 tok/s | 17.5 s, ~25 tok/s | 20.2 tok/s | 19.5 tok/s |
-| slipstream, KV resume | | 0.03 s | | |
-
-Cells show time to first token and sustained decode where both were
-measured, decode alone where prefill was not comparable. Two protocol
-caveats that matter more than they look. The llama.cpp rows and the
-under-1k column come from short prompts of a few dozen tokens, so their
-prefill numbers say little. The ~12k and ~24k slipstream cells generated
-96 tokens rather than 512, which understates sustained rate because
-start-up costs amortize over fewer tokens; treat them as a floor. mlx-lm's
-prefill is missing because its first run also materializes 19 GB of
-lazily mapped weights, as described above.
 
 ## What is built, and what it measured
 
