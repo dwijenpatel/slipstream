@@ -55,42 +55,42 @@ Time to first token, in seconds:
 
 | option                          | memory  | 1k   | 3k   | 12k   | 24k   |
 | ------------------------------- | ------- | ---- | ---- | ----- | ----- |
-| mlx-lm, all weights resident    | 21.6 GB |      |      |       |       |
-| llama.cpp, default              | 16.2 GB | 1.2  | 3.8  | 18.5  | 44.9  |
-| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 2.5  | 7.8  | 35.0  | 78.2  |
-| llama.cpp, that plus `--mmap 0` | 17.2 GB | 2.8  | 11.0 | 51.4  | 141.8 |
-| Ollama                          |         |      |      |       |       |
-| LM Studio, MLX engine           |         |      |      |       |       |
-| SwiftLM                         |         |      |      |       |       |
 | TurboFieldfare, defaults        | 2.0 GB  | 14.3 | 42.5 | 185.1 | 664.8 |
-| TurboFieldfare, 32 of 256       | 3.0 GB  | 15.5 | 70.5 | 265.5 | 720.5 |
 | slipstream, 16 of 256 (default) | 2.5 GB  | 9.3  | 17.4 | 116.9 | 381.7 |
+| TurboFieldfare, 32 of 256       | 3.0 GB  | 15.5 | 70.5 | 265.5 | 720.5 |
 | slipstream, 32 of 256           | 3.5 GB  | 9.4  | 17.3 | 116.9 | 381.4 |
 | slipstream, 64 of 256           | 5.6 GB  | 9.4  | 17.4 | 117.0 | 381.8 |
 | slipstream, 96 of 256           | 7.8 GB  | 9.5  | 17.5 | 117.2 | 382.0 |
 | slipstream, 128 of 256          | 9.9 GB  | 9.5  | 17.5 | 117.4 | 382.8 |
 | slipstream, 192 of 256          | 14.1 GB | 9.5  | 17.4 | 145.5 | 475.4 |
+| llama.cpp, default              | 16.2 GB | 1.2  | 3.8  | 18.5  | 44.9  |
+| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 2.5  | 7.8  | 35.0  | 78.2  |
+| llama.cpp, that plus `--mmap 0` | 17.2 GB | 2.8  | 11.0 | 51.4  | 141.8 |
+| mlx-lm, all weights resident    | 21.6 GB |      |      |       |       |
+| Ollama                          |         |      |      |       |       |
+| LM Studio, MLX engine           |         |      |      |       |       |
+| SwiftLM                         |         |      |      |       |       |
 | slipstream, KV resume           |         |      | 0.03 |       |       |
 
 Sustained decode, in tokens per second:
 
 | option                          | memory  | 1k   | 3k   | 12k  | 24k  |
 | ------------------------------- | ------- | ---- | ---- | ---- | ---- |
-| mlx-lm, all weights resident    | 21.6 GB |      | 41.2 |      |      |
-| llama.cpp, default              | 16.2 GB | 37.6 | 38.6 | 38.3 | 38.9 |
-| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 22.9 | 22.9 | 22.9 | 23.3 |
-| llama.cpp, that plus `--mmap 0` | 17.2 GB | 22.3 | 20.8 | 22.0 | 20.0 |
-| Ollama                          |         |      |      |      |      |
-| LM Studio, MLX engine           |         |      |      |      |      |
-| SwiftLM                         |         |      |      |      |      |
 | TurboFieldfare, defaults        | 2.0 GB  | 26.1 | 23.8 | 17.2 | 13.0 |
-| TurboFieldfare, 32 of 256       | 3.0 GB  | 28.1 | 25.3 | 17.5 | 13.1 |
 | slipstream, 16 of 256 (default) | 2.5 GB  | 24.8 | 26.5 | 23.7 | 22.0 |
+| TurboFieldfare, 32 of 256       | 3.0 GB  | 28.1 | 25.3 | 17.5 | 13.1 |
 | slipstream, 32 of 256           | 3.5 GB  | 26.9 | 28.9 | 24.9 | 22.6 |
 | slipstream, 64 of 256           | 5.6 GB  | 27.1 | 30.8 | 23.9 | 22.2 |
 | slipstream, 96 of 256           | 7.8 GB  | 25.6 | 28.7 | 22.6 | 21.3 |
 | slipstream, 128 of 256          | 9.9 GB  | 26.1 | 29.1 | 22.7 | 22.0 |
 | slipstream, 192 of 256          | 14.1 GB | 24.7 | 23.9 | 12.4 | 12.1 |
+| llama.cpp, default              | 16.2 GB | 37.6 | 38.6 | 38.3 | 38.9 |
+| llama.cpp, `--n-cpu-moe 32`     | 16.8 GB | 22.9 | 22.9 | 22.9 | 23.3 |
+| llama.cpp, that plus `--mmap 0` | 17.2 GB | 22.3 | 20.8 | 22.0 | 20.0 |
+| mlx-lm, all weights resident    | 21.6 GB |      | 41.2 |      |      |
+| Ollama                          |         |      |      |      |      |
+| LM Studio, MLX engine           |         |      |      |      |      |
+| SwiftLM                         |         |      |      |      |      |
 | slipstream, KV resume           |         |      |      |      |      |
 
 The dial saturates early. Going from 16 cached experts to 64 is worth 16
@@ -147,14 +147,14 @@ Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt,
 every row on the same machine and the same prompt file. TurboFieldfare is
 the project slipstream forked from, at its default settings:
 
-| configuration | TTFT | decode | peak memory |
-| --- | --- | --- | --- |
-| mlx-lm, all weights resident | see below | 41.2 tok/s | 21.6 GB |
-| llama.cpp, default | 3.8 s | 38.6 tok/s | 16.2 GB RSS |
-| TurboFieldfare, default settings | 42.5 s | 23.8 tok/s | 2.0 GB |
-| slipstream, 16 of 256 cached (default) | 17.4 s | 26.5 tok/s | 2.5 GB |
-| slipstream, 64 of 256 cached | 17.4 s | 30.8 tok/s | 5.6 GB |
-| slipstream, resuming a saved KV cache | 0.03 s | | plus a 119 MB file |
+| configuration                          | TTFT      | decode     | peak memory        |
+| -------------------------------------- | --------- | ---------- | ------------------ |
+| TurboFieldfare, default settings       | 42.5 s    | 23.8 tok/s | 2.0 GB             |
+| slipstream, 16 of 256 cached (default) | 17.4 s    | 26.5 tok/s | 2.5 GB             |
+| slipstream, 64 of 256 cached           | 17.4 s    | 30.8 tok/s | 5.6 GB             |
+| llama.cpp, default                     | 3.8 s     | 38.6 tok/s | 16.2 GB RSS        |
+| mlx-lm, all weights resident           | see below | 41.2 tok/s | 21.6 GB            |
+| slipstream, resuming a saved KV cache  | 0.03 s    |            | plus a 119 MB file |
 
 The resident row is the tradeoff stated plainly: keeping all 19 GB of
 weights in memory buys about 1.6x the decode speed of the default here,
