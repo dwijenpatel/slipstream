@@ -61,7 +61,6 @@ Peak memory, and time to first token:
 | LM Studio, MLX engine                  |          |       |          |      |      |
 | SwiftLM                                |          |       |          |      |      |
 | TurboFieldfare, default settings       | 1.42 GB  |       | 63.9 s   |      |      |
-| slipstream, 8 of 256 cached            | 0.6 GB   |       |          |      |      |
 | slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 18.5 s   |      |      |
 | slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
 | slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
@@ -81,7 +80,6 @@ Sustained decode, in tokens per second:
 | LM Studio, MLX engine                  |          |       |          |      |      |
 | SwiftLM                                |          |       |          |      |      |
 | TurboFieldfare, default settings       | 1.42 GB  |       | 21.0     |      |      |
-| slipstream, 8 of 256 cached            | 0.6 GB   |       |          |      |      |
 | slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 25.3     |      |      |
 | slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
 | slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
@@ -233,13 +231,19 @@ same boundary anyway. The wait is a floor. Useful work has to move into it
 rather than around it.
 
 **Routing can be predicted a layer ahead, but prefetching on it does not
-pay here.** Running the next layer's router against the current layer's
-state picks 81.9 percent of the experts that layer will actually want.
-Prefetching on that prediction cut disk-wait time by 55 percent and still
-made decode slower overall: on a machine whose memory bus is already
-saturated, the prefetched bytes simply get collected twice. It ships off by
-default and is worth revisiting when a model is far larger than RAM and the
-GPU is genuinely idle during disk reads.
+pay, and we tested the obvious objection.** Running the next layer's router
+against the current layer's state picks about 82 percent of the experts
+that layer will actually want. Prefetching on that prediction cuts
+disk-wait time by more than half and makes decode slower anyway. The first
+measurement ran with a large cache, where little disk wait exists to
+reclaim, so it was retested with a small one where 15.95 ms per token looks
+like idle GPU: prefetch cut that to 7.01 ms and cost 11.2 percent of
+throughput, 40.4 to 45.5 ms per token. The wait was never idle. The runtime
+already commits GPU work before issuing the fetch, so the counter measures
+time spent in an overlapped wait rather than a stall worth reclaiming, and
+moving the same bytes earlier only crowds a saturated bus. It ships off by
+default. The untested case is a model far larger than RAM, where the GPU
+would genuinely stall.
 
 **The KV cache survives the process.** `--kv-snapshot` writes the cache to
 disk and reloads it, turning an 18-second prefill into 0.03 seconds for the

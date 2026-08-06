@@ -179,7 +179,10 @@ for ctx in "${CTXS[@]}"; do
   echo ""
   echo "=== context $ctx ==="
 
-  for slots in 8 16 32 64 96 128 192; do
+  # 8 is omitted deliberately: the prefill routed-tile scheduler refuses
+  # fewer than 16 slots ("needs 16 slots, has 8"), so it is unrunnable
+  # rather than merely slow.
+  for slots in 16 32 64 96 128 192; do
     arm="slipstream, $slots of 256 experts cached"
     echo "$arm" | grep -qE "$ONLY" || continue
     [ -z "$FIRST_ARM" ] && FIRST_ARM="$slots|$ctx"
