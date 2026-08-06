@@ -23,9 +23,9 @@ Ollama, LM Studio, Jan, KoboldCpp, and GPT4All all wrap it. MLX is Apple's
 framework: mlx-lm is the reference library, oMLX a server built on it, and
 LM Studio ships an MLX engine of its own. Expert streaming keeps weights on
 SSD and fetches only what each token routes to: TurboFieldfare, SwiftLM,
-and this project. The tail is MLC-LLM, vLLM, llamafile, text-generation-webui,
-transformers on MPS, and the offload projects born on CUDA: ktransformers,
-PowerInfer, Fiddler, MoE-Infinity, AirLLM.
+and slipstream (this project). The tail is MLC-LLM, vLLM, llamafile,
+text-generation-webui, transformers on MPS, and the offload projects born
+on CUDA: ktransformers, PowerInfer, Fiddler, MoE-Infinity, AirLLM.
 
 **The tail rules itself out.** MLC-LLM compiles ahead of time and shows no
 Qwen3.6 support. vLLM's Metal plugin is young and unverified on this
