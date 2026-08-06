@@ -160,11 +160,13 @@ struct ServerPromptCacheTests {
         let rendered = tokenizer.encode(
             try tokenizer.applyChatTemplate(changed.messages),
             addBOS: false)
+        // A genuinely different first user turn: the KV cannot serve this, and
+        // the reason has to say so rather than blaming the assistant turn.
         #expect(cache.match(
             domain: domain,
             request: changed,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer) == .miss)
+            tokenizer: tokenizer) == .miss(.historyDiverged))
     }
 
     @Test func tailCompletedStopStringDoesNotPublishPrefix() async throws {

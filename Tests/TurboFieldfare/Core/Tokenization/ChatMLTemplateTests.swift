@@ -61,7 +61,7 @@ struct ChatMLTemplateTests {
     func singleUserTurn() throws {
         let p = try tok.applyChatTemplate([Message(role: .user, content: "Hi")])
         #expect(p == "<|im_start|>user\nHi<|im_end|>\n"
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            + "<|im_start|>assistant\n<think>\n")
     }
 
     @Test("Multi-turn renders roles verbatim with assistant unrenamed")
@@ -76,7 +76,7 @@ struct ChatMLTemplateTests {
             + "<|im_start|>user\nA<|im_end|>\n"
             + "<|im_start|>assistant\nB<|im_end|>\n"
             + "<|im_start|>user\nC<|im_end|>\n"
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            + "<|im_start|>assistant\n<think>\n")
     }
 
     @Test("Message content is trimmed like the Gemma path")
@@ -102,7 +102,9 @@ struct ChatMLTemplateTests {
         #expect(ids.first == 248045, "expected <|im_start|> first, got \(String(describing: ids.first))")
         #expect(ids.contains(tok.endOfTurnID))
         #expect(ids.contains(tok.thinkStartID ?? -1))
-        #expect(ids.contains(tok.thinkEndID ?? -1))
+        // The `<think>` is left open for the model to reason into, so the
+        // generation prompt must not close it.
+        #expect(!ids.contains(tok.thinkEndID ?? -1))
         #expect(tok.decode(ids, skipSpecialTokens: false) == p)
     }
 
@@ -112,11 +114,14 @@ struct ChatMLTemplateTests {
         #expect(ids.first == tok.endOfTurnID)
         let text = tok.decode(ids, skipSpecialTokens: false)
         #expect(text == "<|im_end|>\n<|im_start|>user\nNext<|im_end|>\n"
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            + "<|im_start|>assistant\n<think>\n")
     }
 
-    @Test("Tool-result KV continuation is unsupported for chatml")
-    func toolResultContinuationUnsupported() {
+    /// ChatML tool-result continuation is supported now; what it still refuses
+    /// is a continuation that is not an extension of the cached turn, which the
+    /// caller must answer with a real re-prefill.
+    @Test("Tool-result KV continuation rejects a diverged chatml continuation")
+    func toolResultContinuationRejectsDivergence() {
         #expect(throws: GFTokenizerError.self) {
             _ = try tok.encodeToolResultContinuation(
                 cachedMessages: [Message(role: .user, content: "Hi")],
@@ -128,7 +133,7 @@ struct ChatMLTemplateTests {
         }
     }
 
-    @Test("Tool chat renders the bundled Jinja template with thinking disabled")
+    @Test("Tool chat renders the bundled Jinja template with thinking enabled")
     func toolChatRendersJinja() throws {
         let ids = try tok.encodeToolChat(
             messages: [
@@ -151,7 +156,7 @@ struct ChatMLTemplateTests {
         #expect(text.contains("Be helpful."))
         #expect(text.contains("<|im_start|>user\nWeather in Paris?<|im_end|>\n"))
         let suffix = String(text.suffix(80))
-        #expect(text.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
-                "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
+        #expect(text.hasSuffix("<|im_start|>assistant\n<think>\n"),
+                "expected an open <think> generation prompt, got suffix: \(suffix)")
     }
 }

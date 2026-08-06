@@ -36,6 +36,21 @@ struct ChatMLDecoderTests {
         }
     }
 
+    /// With thinking enabled the generation prompt already ends with an open
+    /// `<think>`, so the model emits reasoning bare and the decoder never sees
+    /// a `<think>` token to switch on. Starting in `.visible` would stream the
+    /// whole chain of thought to the client as ordinary content.
+    @Test("Reasoning is suppressed when the prompt pre-opened <think>")
+    func preopenedThinkingIsSuppressed() throws {
+        let d = StructuredAssistantDecoder(tokenizer: tok,
+                                           allowedTools: [],
+                                           idGenerator: { "call_fixed" },
+                                           thinkingPreopened: true)
+        let events = try feed("secret reasoning</think>\n\nvisible answer", into: d)
+        #expect(visibleText(events) == "visible answer")
+        try d.finish()
+    }
+
     @Test("Visible text streams through unchanged")
     func plainText() throws {
         let d = decoder()

@@ -15,20 +15,42 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private let tokenizer: GFTokenizer
     private let allowedTools: Set<String>
     private let idGenerator: @Sendable () -> String
-    private var channel: Channel = .visible
+    private var channel: Channel
     private var label = ""
     private var toolTokens: [Int32]?
     private var emittedCalls = 0
     private var failed = false
+    private var trimmingLeadingNewlines = false
 
+    /// Kept as a distinct entry point rather than defaulting `thinkingPreopened`
+    /// on the designated init below: a default changes the mangled symbol and
+    /// breaks callers in other modules compiled against the three-argument form.
+    public convenience init(tokenizer: GFTokenizer,
+                            allowedTools: Set<String>,
+                            idGenerator: @escaping @Sendable () -> String = {
+                                "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
+                            }) {
+        self.init(tokenizer: tokenizer,
+                  allowedTools: allowedTools,
+                  idGenerator: idGenerator,
+                  thinkingPreopened: false)
+    }
+
+    /// `thinkingPreopened` reports that the prompt already ends with an open
+    /// `<think>`, which is how the ChatML template starts a thinking turn. The
+    /// model then emits reasoning bare — there is no `<think>` token in the
+    /// output to switch on — so the decoder has to begin in `.thought` or the
+    /// whole chain of thought streams to the client as content.
     public init(tokenizer: GFTokenizer,
                 allowedTools: Set<String>,
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
-                }) {
+                },
+                thinkingPreopened: Bool) {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
         self.idGenerator = idGenerator
+        self.channel = thinkingPreopened ? .thought : .visible
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
@@ -150,10 +172,20 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         if tokenID == tokenizer.thinkEndID {
             channel = .visible
+            // The model emits `</think>\n\n` before the answer. That separator
+            // belongs to the template, not the reply — the template itself
+            // drops it (`content.split('</think>')[-1].lstrip('\n')`), so a
+            // reply would otherwise start with two blank lines.
+            trimmingLeadingNewlines = true
             return []
         }
         guard channel != .thought else { return [] }
-        return delta.isEmpty ? [] : [.content(delta)]
+        var visible = delta
+        if trimmingLeadingNewlines {
+            visible = String(visible.drop(while: { $0 == "\n" }))
+            if !visible.isEmpty { trimmingLeadingNewlines = false }
+        }
+        return visible.isEmpty ? [] : [.content(visible)]
     }
 
     public func finish() throws {

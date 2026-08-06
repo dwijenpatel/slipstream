@@ -31,8 +31,32 @@ struct ServerPromptCacheEntry: Sendable, Equatable {
     let kvPosition: Int
 }
 
+/// Why a lookup missed. A miss is only legitimate when the KV genuinely cannot
+/// serve the request; anything else is a bug that shows up as a full re-prefill
+/// and is otherwise indistinguishable from correct behavior. Logging the reason
+/// is what makes the difference visible — `historyDiverged` and
+/// `assistantDiverged` on a steady agent loop mean something is wrong.
+enum ServerPromptCacheMiss: String, Sendable, Equatable {
+    /// Nothing cached yet, or the last turn was not publishable.
+    case noEntry
+    /// Model, runtime, or template changed under us.
+    case domainChanged
+    /// The client altered its tool definitions.
+    case toolsChanged
+    /// The entry's own KV invariants do not hold.
+    case entryUnusable
+    /// The replayed history is not an extension of what we served.
+    case historyDiverged
+    /// The client sent back a different assistant turn than we generated.
+    case assistantDiverged
+    /// Continuation is not the tool-result or single-user shape we can bridge.
+    case continuationShape
+    /// The template could not produce a bridge from the cached boundary.
+    case bridgeUnavailable
+}
+
 enum ServerPromptCacheMatch: Sendable, Equatable {
-    case miss
+    case miss(ServerPromptCacheMiss)
     case hit(effectivePromptIDs: [Int32], cachedPromptTokens: Int)
 }
 
@@ -93,13 +117,13 @@ struct ServerPromptCache: Sendable {
         renderedPromptIDs: [Int32],
         tokenizer: GFTokenizer
     ) -> ServerPromptCacheMatch {
-        guard let entry,
-              entry.domain == domain,
-              entry.tools == request.tools,
-              entry.kvPosition == entry.kvBackedTokenIDs.count,
+        guard let entry else { return .miss(.noEntry) }
+        guard entry.domain == domain else { return .miss(.domainChanged) }
+        guard entry.tools == request.tools else { return .miss(.toolsChanged) }
+        guard entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
               entry.uncommittedBoundaryTokenIDs.count == 1 else {
-            return .miss
+            return .miss(.entryUnusable)
         }
 
         if renderedPromptIDs.count > entry.kvPosition,
@@ -113,11 +137,13 @@ struct ServerPromptCache: Sendable {
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)
-                .elementsEqual(entry.inputMessages),
-              assistantMatches(
+                .elementsEqual(entry.inputMessages) else {
+            return .miss(.historyDiverged)
+        }
+        guard assistantMatches(
                 request.messages[inputCount],
                 entry.assistantTurn.message) else {
-            return .miss
+            return .miss(.assistantDiverged)
         }
         let continuation = Array(request.messages.dropFirst(inputCount + 1))
 
@@ -163,13 +189,13 @@ struct ServerPromptCache: Sendable {
               continuation[0].toolCallID == nil,
               entry.assistantTurn.rawStopReason == .endOfTurn
                 || entry.assistantTurn.rawStopReason == .maxTokens else {
-            return .miss
+            return .miss(.continuationShape)
         }
         var bridge = tokenizer.encodeTextContinuation(userContent: content)
         if entry.assistantTurn.rawStopReason == .maxTokens {
             bridge = entry.uncommittedBoundaryTokenIDs + bridge
         } else if bridge.first != entry.uncommittedBoundaryTokenIDs.first {
-            return .miss
+            return .miss(.bridgeUnavailable)
         }
         return .hit(
             effectivePromptIDs: entry.kvBackedTokenIDs + bridge,
@@ -183,7 +209,13 @@ struct ServerPromptCache: Sendable {
         tokenizer: GFTokenizer
     ) -> ServerPromptCacheMatch {
         let calls = entry.assistantTurn.message.toolCalls
-        guard entry.assistantTurn.rawStopReason == .toolCalls,
+        // `.toolCalls` is Gemma reporting its `<tool_response>` stop token.
+        // ChatML has no such token in its stop set: a tool-calling turn there
+        // ends on `<|im_end|>` and reports `.endOfTurn`, so requiring
+        // `.toolCalls` alone made this path unreachable for Qwen. Both mean the
+        // same thing here — a turn that ended cleanly holding tool calls.
+        guard entry.assistantTurn.rawStopReason == .toolCalls
+                || entry.assistantTurn.rawStopReason == .endOfTurn,
               continuation.count == calls.count,
               zip(continuation, calls).allSatisfy({ message, call in
                   message.role == .tool
@@ -192,7 +224,7 @@ struct ServerPromptCache: Sendable {
                     && message.content != nil
                     && message.toolCalls.isEmpty
               }) else {
-            return .miss
+            return .miss(.continuationShape)
         }
         guard let bridge = try? tokenizer.encodeToolResultContinuation(
             cachedMessages: entry.inputMessages,
@@ -200,7 +232,7 @@ struct ServerPromptCache: Sendable {
             incomingMessages: request.messages,
             tools: request.tools),
               bridge.first == entry.uncommittedBoundaryTokenIDs.first else {
-            return .miss
+            return .miss(.bridgeUnavailable)
         }
         return .hit(
             effectivePromptIDs: entry.kvBackedTokenIDs + bridge,

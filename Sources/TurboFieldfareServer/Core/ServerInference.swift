@@ -251,13 +251,15 @@ public actor ServerModelSession: ServerInferenceBackend {
 
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
+        var cacheMiss: ServerPromptCacheMiss?
         if promptCacheMode == .singlePrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
                 request: request,
                 renderedPromptIDs: promptIDs,
                 tokenizer: tokenizer) {
-            case .miss:
+            case .miss(let reason):
+                cacheMiss = reason
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
@@ -283,10 +285,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
+        // ChatML's generation prompt leaves `<think>` open, so a decoder is
+        // needed even without tools: nothing else would keep reasoning out of
+        // the client's content stream.
+        let thinkingPreopened = tokenizer.dialect == .chatml
+        let decoder = needsToolTemplate || thinkingPreopened
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
+                allowedTools: Set(request.tools.map(\.name)),
+                thinkingPreopened: thinkingPreopened)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
@@ -372,7 +379,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             + "new_prompt=\(result.computedPrefillTokens) completion=\(result.newTokens) "
             + String(format: "ttft=%.2fs prefill=%.1ftok/s decode=%.1ftok/s total=%.2fs",
                      ttft, prefillRate, decodeRate, ttft + result.decodeSeconds)
-            + " stop=\(reason)\n").utf8))
+            + " stop=\(reason)"
+            + (cacheMiss.map { " cache_miss=\($0.rawValue)" } ?? "")
+            + "\n").utf8))
 
         if promptCacheMode == .singlePrefix {
             promptCache.publish(

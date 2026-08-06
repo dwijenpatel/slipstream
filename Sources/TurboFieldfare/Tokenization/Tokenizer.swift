@@ -336,20 +336,18 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let bosMark     = "<bos>"
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
-    /// Generation prompt with thinking DISABLED, matching the Jinja template's
-    /// `enable_thinking=false` branch.
+    /// Generation prompt with thinking ENABLED, matching the Jinja template's
+    /// `enable_thinking` branch: the `<think>` is left OPEN, so the model emits
+    /// reasoning bare and never produces a `<think>` token of its own. The
+    /// decoder is told this via `thinkingPreopened` so it starts in the thought
+    /// channel rather than streaming reasoning to the client as content.
     ///
-    /// Qwen3.6 is post-trained to reason inside <think>...</think>, so this
-    /// suppresses a capability the model has. It stays off because enabling it
-    /// breaks the prompt cache: reasoning lands in the KV, the client never
-    /// receives it (the decoder routes it to a separate channel), and the
-    /// re-rendered turn therefore no longer matches the KV, turning every turn
-    /// into a full re-prefill. Measured 2026-08-06: cache hit rate went from
-    /// 96% to 0. Enabling this requires the cache to splice the generated
-    /// token IDs instead of re-rendering; the ChatML continuation encoder
-    /// below is the groundwork for that and is not yet sufficient.
+    /// Reasoning lands in the KV but never reaches the client, so a re-render
+    /// can no longer reproduce the KV and the cache's exact-prefix fast path
+    /// stops matching. The structural path covers that by splicing the stored
+    /// token IDs — which is what makes thinking affordable here.
     private static let chatMLGenerationSuffix =
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        "<|im_start|>assistant\n<think>\n"
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
@@ -447,7 +445,7 @@ public struct GFTokenizer: @unchecked Sendable {
             // that on this flag; Gemma's template does not use it and its
             // captured-boundary tests pin the non-thinking render, so scope
             // the change to the dialect that asked for it.
-            additionalContext: ["enable_thinking": false]
+            additionalContext: ["enable_thinking": dialect == .chatml]
         ).map(Int32.init)
     }
 
@@ -493,12 +491,19 @@ public struct GFTokenizer: @unchecked Sendable {
                 tools: tools,
                 addGenerationPrompt: false)
             let full = try encodeToolChat(messages: incomingMessages, tools: tools)
+            // Split AT the assistant's `<|im_end|>`, not after it. Gemma stops
+            // a tool-calling turn on `<tool_response>`, the first token of the
+            // NEXT segment, so there the bridge simply follows the prefix.
+            // ChatML stops on `<|im_end|>`, the LAST token of the current one,
+            // and the KV stops short of it — so it has to lead the bridge or
+            // the continuation drops a token.
             guard full.count > prefix.count,
-                  full.prefix(prefix.count).elementsEqual(prefix) else {
+                  full.prefix(prefix.count).elementsEqual(prefix),
+                  let boundary = prefix.lastIndex(of: endOfTurnID) else {
                 throw GFTokenizerError.invalidChatTemplate(
                     "chatml continuation prefix diverged; re-render required")
             }
-            return Array(full[prefix.count...])
+            return Array(full[boundary...])
         }
         guard dialect == .gemma else {
             throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
