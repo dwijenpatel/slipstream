@@ -5,9 +5,9 @@ near-roofline Metal kernels, and a KV cache that survives the process.
 
 Qwen3.6-35B-A3B generates at 21 tokens per second on a base M5 MacBook, in
 1.9 GB of memory. Its weights are 18 GB. slipstream leaves them on SSD and
-streams only the eight experts each token actually routes to, through a
-cache you size yourself, so memory is a dial you set rather than a number
-the model dictates. Prompts do not have to be paid for twice either: the KV
+streams only the eight experts each token actually routes to, staying
+inside a RAM budget you set, so memory is a dial rather than a number the
+model dictates. Prompts do not have to be paid for twice either: the KV
 cache persists to disk, so a 2,940-token prompt that costs 18.5 seconds to
 read the first time comes back in 0.03 seconds, byte for byte, on every run
 after. Doing this without giving up speed is the point of the kernels
