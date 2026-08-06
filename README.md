@@ -52,51 +52,53 @@ sizes in tokens. Blank cells are unmeasured, not unmeasurable.
 
 Peak memory, and time to first token:
 
-| option | peak RAM | <1k | ~3k | ~12k | ~24k |
-| --- | --- | --- | --- | --- | --- |
-| mlx-lm, resident | 21.6 GB | | see note | | |
-| llama.cpp, default | ~17.4 GB | 0.7 s | | | |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap` | ~5.7 GB | 2.6 s | | | |
-| Ollama | | | | | |
-| LM Studio, MLX engine | | | | | |
-| SwiftLM | | | | | |
-| TurboFieldfare, default settings | 1.42 GB | | 63.9 s | | |
-| slipstream, 8 of 256 cached | 0.6 GB | | | | |
-| slipstream, 16 of 256 cached (default) | 1.90 GB | | 18.5 s | | |
-| slipstream, 32 of 256 cached | 2.3 GB | | | | |
-| slipstream, 64 of 256 cached | 4.5 GB | | | | |
-| slipstream, 96 of 256 cached | 6.8 GB | | | | |
-| slipstream, 128 of 256 cached | 9.1 GB | | 17.5 s | | |
-| slipstream, 192 of 256 cached | 13.6 GB | | | | |
-| slipstream, KV resume | 1.90 GB | | 0.03 s | | |
+| option                                 | peak RAM | <1k   | ~3k      | ~12k | ~24k |
+| -------------------------------------- | -------- | ----- | -------- | ---- | ---- |
+| mlx-lm, resident                       | 21.6 GB  |       | see note |      |      |
+| llama.cpp, default                     | ~17.4 GB | 0.7 s |          |      |      |
+| llama.cpp, `--n-cpu-moe 32 --no-mmap`  | ~5.7 GB  | 2.6 s |          |      |      |
+| Ollama                                 |          |       |          |      |      |
+| LM Studio, MLX engine                  |          |       |          |      |      |
+| SwiftLM                                |          |       |          |      |      |
+| TurboFieldfare, default settings       | 1.42 GB  |       | 63.9 s   |      |      |
+| slipstream, 8 of 256 cached            | 0.6 GB   |       |          |      |      |
+| slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 18.5 s   |      |      |
+| slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
+| slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
+| slipstream, 96 of 256 cached           | 6.8 GB   |       |          |      |      |
+| slipstream, 128 of 256 cached          | 9.1 GB   |       | 17.5 s   |      |      |
+| slipstream, 192 of 256 cached          | 13.6 GB  |       |          |      |      |
+| slipstream, KV resume                  | 1.90 GB  |       | 0.03 s   |      |      |
 
 Sustained decode, in tokens per second:
 
-| option | peak RAM | <1k | ~3k | ~12k | ~24k |
-| --- | --- | --- | --- | --- | --- |
-| mlx-lm, resident | 21.6 GB | | 41.2 | | |
-| llama.cpp, default | ~17.4 GB | 32.6 | | | |
-| llama.cpp, `--n-cpu-moe 32 --no-mmap` | ~5.7 GB | 19.1 | | | |
-| Ollama | | | | | |
-| LM Studio, MLX engine | | | | | |
-| SwiftLM | | | | | |
-| TurboFieldfare, default settings | 1.42 GB | | 21.0 | | |
-| slipstream, 8 of 256 cached | 0.6 GB | | | | |
-| slipstream, 16 of 256 cached (default) | 1.90 GB | | 25.3 | | |
-| slipstream, 32 of 256 cached | 2.3 GB | | | | |
-| slipstream, 64 of 256 cached | 4.5 GB | | | | |
-| slipstream, 96 of 256 cached | 6.8 GB | | | | |
-| slipstream, 128 of 256 cached | 9.1 GB | 27.7 | 32.1 | 20.2 | 19.5 |
-| slipstream, 192 of 256 cached | 13.6 GB | | | | |
-| slipstream, KV resume | 1.90 GB | | slow until the cache warms | | |
+| option                                 | peak RAM | <1k   | ~3k      | ~12k | ~24k |
+| -------------------------------------- | -------- | ----- | -------- | ---- | ---- |
+| mlx-lm, resident                       | 21.6 GB  |       | 41.2     |      |      |
+| llama.cpp, default                     | ~17.4 GB | 32.6  |          |      |      |
+| llama.cpp, `--n-cpu-moe 32 --no-mmap`  | ~5.7 GB  | 19.1  |          |      |      |
+| Ollama                                 |          |       |          |      |      |
+| LM Studio, MLX engine                  |          |       |          |      |      |
+| SwiftLM                                |          |       |          |      |      |
+| TurboFieldfare, default settings       | 1.42 GB  |       | 21.0     |      |      |
+| slipstream, 8 of 256 cached            | 0.6 GB   |       |          |      |      |
+| slipstream, 16 of 256 cached (default) | 1.90 GB  |       | 25.3     |      |      |
+| slipstream, 32 of 256 cached           | 2.3 GB   |       |          |      |      |
+| slipstream, 64 of 256 cached           | 4.5 GB   |       |          |      |      |
+| slipstream, 96 of 256 cached           | 6.8 GB   |       |          |      |      |
+| slipstream, 128 of 256 cached          | 9.1 GB   | 27.7  | 32.1     | 20.2 | 19.5 |
+| slipstream, 192 of 256 cached          | 13.6 GB  |       |          |      |      |
+| slipstream, KV resume                  | 1.90 GB  |       |          |      |      |
 
 Caching 128 experts instead of the default 16 is worth 27 percent of
 decode speed, 25.3 to 32.1 tokens per second, for about 7 GB. That is the
 dial.
 
-"Slow until the cache warms" is the KV-resume tradeoff: restoring a cache
-skips prefill, and prefill is also what fills the expert cache, so the
-first tokens after a resume run against an empty one.
+The KV-resume row has no decode figure because it has not been measured.
+Restoring a cache skips prefill, and prefill is also what fills the expert
+cache, so the first tokens after a resume run against an empty one and the
+rate climbs as it fills. A single sustained number would misrepresent
+that, and the honest version needs a curve.
 
 Three caveats. The llama.cpp rows and the under-1k column used prompts of
 a few dozen tokens, so their prefill figures mean little. The ~12k and
@@ -142,7 +144,7 @@ the project slipstream forked from, at its default settings:
 | TurboFieldfare, default settings | 63.9 s | 21.0 tok/s | 1.42 GB |
 | slipstream, 16 of 256 cached (default) | 18.5 s | 25.3 tok/s | 1.90 GB |
 | slipstream, 128 of 256 cached | 17.5 s | 32.1 tok/s | 9.1 GB |
-| slipstream, resuming a saved KV cache | 0.03 s | slow until the cache warms | plus a 119 MB file |
+| slipstream, resuming a saved KV cache | 0.03 s | | plus a 119 MB file |
 
 The resident row is the tradeoff stated plainly: keeping all 19 GB of
 weights in memory buys roughly twice the decode speed, and costs eleven
