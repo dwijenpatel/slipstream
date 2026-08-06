@@ -22,6 +22,9 @@ public struct RawDecodeResult: Sendable {
     public let cachedPromptTokens: Int
     public let computedPrefillTokens: Int
     public let prefillSeconds: Double
+    /// Producer reset or continuation setup, which happens before the prefill
+    /// window and is therefore not part of `prefillSeconds`.
+    public let prepareSeconds: Double
     public let newTokens: Int
     public let decodeSeconds: Double
     public let reason: StopReason
@@ -142,6 +145,9 @@ public func runRawCompletion(producer: any LogitProducer,
                                              maxNew: config.maxNewTokens,
                                              maxContext: context.maxContext)
     }
+    // Timed separately: this sits outside the prefill window, so any cost it
+    // carries was invisible in ttft and would be misread as prefill.
+    let prepareStart = Date()
     switch start {
     case .reset:
         producer.reset()
@@ -150,6 +156,7 @@ public func runRawCompletion(producer: any LogitProducer,
         try continuable.prepareForContinuation(expectedPosition: cachedPromptTokens)
     }
     let prefillStart = Date()
+    let prepareSeconds = prefillStart.timeIntervalSince(prepareStart)
     var position = cachedPromptTokens
     var prefillSeed: PrefillSeed?
     let prefillTokens = promptIds[cachedPromptTokens...]
@@ -381,6 +388,7 @@ public func runRawCompletion(producer: any LogitProducer,
                            cachedPromptTokens: cachedPromptTokens,
                            computedPrefillTokens: computedPrefillTokens,
                            prefillSeconds: prefillSeconds,
+                           prepareSeconds: prepareSeconds,
                            newTokens: generated,
                            decodeSeconds: Date().timeIntervalSince(decodeStart),
                            reason: reason,

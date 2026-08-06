@@ -221,6 +221,7 @@ struct ServerPromptCacheTests {
             cachedPromptTokens: 0,
             computedPrefillTokens: prompt.count,
             prefillSeconds: 0,
+            prepareSeconds: 0,
             newTokens: 1,
             decodeSeconds: 0,
             reason: reason,

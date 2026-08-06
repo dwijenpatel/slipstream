@@ -235,6 +235,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             || request.messages.contains {
                 $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
             }
+        let renderStart = Date()
         let promptIDs: [Int32]
         if needsToolTemplate {
             promptIDs = try tokenizer.encodeToolChat(messages: request.messages, tools: request.tools)
@@ -242,6 +243,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             let rendered = try tokenizer.applyChatTemplate(request.messages)
             promptIDs = tokenizer.encode(rendered, addBOS: false)
         }
+        let renderSeconds = Date().timeIntervalSince(renderStart)
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
                 message: "prompt exceeds the configured context",
@@ -252,6 +254,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
         var cacheMiss: ServerPromptCacheMiss?
+        let matchStart = Date()
         if promptCacheMode == .singlePrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
@@ -272,6 +275,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             effectivePromptIDs = promptIDs
             completionStart = .reset
         }
+        let matchSeconds = Date().timeIntervalSince(matchStart)
         guard effectivePromptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
                 message: "effective prompt exceeds the configured context",
@@ -381,6 +385,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                      ttft, prefillRate, decodeRate, ttft + result.decodeSeconds)
             + " stop=\(reason)"
             + (cacheMiss.map { " cache_miss=\($0.rawValue)" } ?? "")
+            // Regions outside the prefill window. ttft counts prefill ONLY, so
+            // anything here is time the client waits that ttft never showed.
+            + String(format: " render=%.3fs match=%.3fs prepare=%.3fs",
+                     renderSeconds, matchSeconds, result.prepareSeconds)
             + "\n").utf8))
 
         if promptCacheMode == .singlePrefix {
