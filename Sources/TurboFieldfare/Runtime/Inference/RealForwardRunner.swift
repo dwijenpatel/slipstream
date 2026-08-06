@@ -321,7 +321,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
     /// callers that sample from the logits buffer (non-greedy configs) must pass
     /// `forceLogitsHead: true` or they read a never-written buffer.
-    private let useFusedGreedyHead: Bool
+    /// Which head the next generation uses. Set per request rather than
+    /// fixed at construction: a server has to serve greedy and sampled
+    /// requests from ONE runner, and the fused head is the faster path for
+    /// greedy (it writes a single token id instead of materializing a
+    /// 248,320-entry logit vector per token). Sampling still needs logits,
+    /// so callers set this from the request's own configuration.
+    private var useFusedGreedyHead: Bool
+    private let fusedHeadAvailable: Bool
     private let prefillAttentionPath: RuntimePrefillAttentionPath
     public let rdadviseEnabled: Bool
     public let rdadvisePolicyMode: RDAdvicePolicyMode
@@ -336,6 +343,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.cfg = model.config
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+        self.fusedHeadAvailable = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -638,6 +646,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalHeadFusedNanos: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
+
+    /// Select the head for the coming generation. Only meaningful when the
+    /// runner was built with the fused head available; a runner constructed
+    /// with `forceLogitsHead` stays on logits regardless.
+    public func setGreedyHeadEnabled(_ enabled: Bool) {
+        guard fusedHeadAvailable else { return }
+        useFusedGreedyHead = enabled
+    }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
     public private(set) var totalRDAdviseCalls: UInt64 = 0
     public private(set) var totalRDAdviseBytes: UInt64 = 0

@@ -104,6 +104,11 @@ public func runRawCompletion(producer: any LogitProducer,
         throw GeneratorError.emptyPrompt
     }
     let fusedRunner = producer as? RealForwardRunner
+    // Pick the head from THIS request's sampling configuration. A server
+    // serves greedy and sampled requests from one runner, and the fused
+    // head is the faster path for greedy; sampling needs the logit vector.
+    // No-op on a runner built with forceLogitsHead.
+    fusedRunner?.setGreedyHeadEnabled(config.isPureGreedy)
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(

@@ -147,9 +147,12 @@ public actor ServerModelSession: ServerInferenceBackend {
         // Leaving this at the struct default of 128 cost 64 s of the 87.8 s a
         // 2,940-token prompt took through the server, against 36.7 s for the
         // same work through the CLI (measured 2026-08-06).
+        // The fused head is now selected per request from the request's own
+        // sampling config (see RawCompletion), so the server no longer has to
+        // give it up wholesale to be able to serve temperature > 0.
         let runtime = RuntimeConfiguration(
             prefillChunkTokens: RuntimeConfiguration.allowedPrefillChunkTokens.last!,
-            forceLogitsHead: true)
+            forceLogitsHead: false)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
