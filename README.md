@@ -40,22 +40,34 @@ days. Models age out; the pipeline compounds. See `playbook/`.
 
 ## Measured state (M5, 10-core GPU, 24 GB)
 
-Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt:
+Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt.
+The first row is TurboFieldfare, the project slipstream forked from, run at
+its own defaults:
 
 | configuration | TTFT | decode | peak memory |
 | --- | --- | --- | --- |
-| upstream defaults | 63.3 s | ~18 tok/s | 1.13 GB RSS |
+| TurboFieldfare, its defaults | 63.3 s | ~18 tok/s | 1.13 GB RSS |
 | slipstream, out of the box | 18.5 s | 21.4 tok/s | 1.90 GB |
-| slipstream, 128-slot expert cache | 17.5 s | ~25 tok/s | grows with the cache |
+| slipstream, expert cache raised to 128 slots | 17.5 s | ~25 tok/s | up to 9.1 GB |
 | slipstream, resuming a saved KV cache | 0.03 s | ramps from cold | plus a 119 MB file |
 
-Upstream's figure is resident set size as they publish it; slipstream's is
-peak physical footprint, which counts GPU allocations that resident set
-size misses. Measured the same way, slipstream's resident set size is
-1.14 GB. The 128-slot and upstream rows were measured 2026-08-01, the rest
-2026-08-05. Resuming a KV cache restores the prompt exactly, byte for byte,
-but decode then starts against a cold expert cache, because prefill is
-what normally warms it. The section below returns to that tradeoff.
+The expert cache is counted in slots, and one slot holds one expert's
+weights for one layer. This model puts 256 experts in each of its 40
+layers at 1.7 MB per expert, so the default 16 slots cap the cache at
+1.1 GB and 128 slots cap it at 9.1 GB. Slots fill only as experts get
+used, so those are ceilings rather than reservations. Eight times the
+memory buys under 10 percent more decode speed here, which is the honest
+shape of the dial: on this model it decides whether you can run at all far
+more than it decides how fast.
+
+TurboFieldfare's memory figure is resident set size, as they publish it;
+slipstream's is peak physical footprint, which counts GPU allocations that
+resident set size misses. Measured the same way, slipstream's resident set
+size is 1.14 GB. The TurboFieldfare and 128-slot rows were measured
+2026-08-01, the rest 2026-08-05. Resuming a KV cache restores the prompt
+exactly, byte for byte, but decode then starts against a cold expert cache,
+because prefill is what normally warms it. The section below returns to
+that tradeoff.
 
 Where a token's 40.7 ms went, at 128 cache slots: 9 ms waiting for the GPU
 between layers, 7.8 ms awaiting expert reads from SSD, 6.5 ms in the expert
