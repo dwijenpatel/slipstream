@@ -44,6 +44,15 @@ public actor TurboFieldfareHTTPServer {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 childChannels.insert(channel)
+                // NOTE: withPipeliningAssistance gates reads while a response
+                // is outstanding, so the socket is not polled during a long
+                // generation and a client that disappears is invisible until
+                // the work finishes. Disabling it does make disconnects land
+                // (verified: CPU drops to 0 within 5 s), but it breaks
+                // response ordering for pipelined requests, which
+                // pipelinedStreamingThenHealthResponsesRemainOrdered covers.
+                // The fix needs a front-of-pipeline handler that can poll for
+                // EOF without disturbing ordering; see next-steps.
                 return channel.pipeline.configureHTTPServerPipeline(
                     withPipeliningAssistance: true,
                     withErrorHandling: true
@@ -58,6 +67,13 @@ public actor TurboFieldfareHTTPServer {
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            // Without this the peer's EOF only surfaces as a full channel
+            // close, and configureHTTPServerPipeline(withPipeliningAssistance:)
+            // gates reads while a response is outstanding, so a client that
+            // vanishes mid-request is never noticed until the work finishes.
+            // That is what let abandoned generations run to completion and
+            // wedge the single slot (2026-08-05, kb-build task 03).
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
         let channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
         self.channel = channel
         return channel
@@ -169,10 +185,24 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        activeTask?.cancel()
-        activeTask = nil
+        cancelActive(reason: "channelInactive")
         childChannels.remove(context.channel)
         context.fireChannelInactive()
+    }
+
+    /// The client going away arrives here, not at channelInactive, whenever a
+    /// response is still outstanding.
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if case ChannelEvent.inputClosed = event {
+            cancelActive(reason: "inputClosed")
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    private func cancelActive(reason: String) {
+        guard let task = activeTask else { return }
+        task.cancel()
+        activeTask = nil
     }
 
     private func route(head: HTTPRequestHead,

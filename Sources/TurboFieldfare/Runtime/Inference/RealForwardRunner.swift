@@ -743,6 +743,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               startPosition: startPosition,
                                               config: config)
         for (spanIndex, span) in spans.enumerated() {
+            // A disconnected client cancels its task, but nothing here used to
+            // notice: prefill ran to completion for a caller that had gone.
+            // With litellm retrying eight times that stacked eight full
+            // prefills of a 20k prompt, ~48 minutes of generating for nobody,
+            // and it wedged the single-slot server (2026-08-05, kb-build 03).
+            try Task.checkCancellation()
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try await executePrefillChunk(
@@ -1860,6 +1866,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             outScale: embedOutScale)
 
         for L in 0..<cfg.numLayers {
+            // Per-layer as well as per-chunk: under --prefill-chunk auto a
+            // whole prompt can be a single span, so a span-level check alone
+            // would never fire mid-prefill.
+            try Task.checkCancellation()
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             try encodePrefillLayerThroughRouter(cb: cb,
