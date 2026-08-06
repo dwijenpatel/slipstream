@@ -3,11 +3,10 @@
 Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
 near-roofline Metal kernels, and a KV cache that survives the process.
 
-Qwen3.6-35B-A3B generates at 25 tokens per second on a base M5 MacBook, in
-1.9 GB of memory, or 32 with more of the experts cached. Its weights are
-18 GB. slipstream leaves them on SSD and
-streams only the eight experts each token actually routes to, staying
-inside a RAM budget you set, so memory is a dial rather than a number the
+Qwen3.6-35B-A3B generates at 25 tokens per second on a base M5 MacBook in
+1.9 GB of memory, or 32 with more experts cached. Its weights are 18 GB.
+slipstream leaves them on SSD and streams only the eight experts each
+token actually routes to, staying inside a RAM budget you set, so memory is a dial rather than a number the
 model dictates. Prompts do not have to be paid for twice either: the KV
 cache persists to disk, so a 2,940-token prompt that costs 18.5 seconds to
 read the first time comes back in 0.03 seconds, byte for byte, on every run
@@ -61,9 +60,14 @@ Peak memory, and time to first token:
 | Ollama | | | | | |
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
-| TurboFieldfare, its defaults | 1.42 GB | | 63.9 s | | |
-| slipstream, defaults (16 of 256 experts cached) | 1.90 GB | | 18.5 s | | |
-| slipstream, half the experts cached | up to 9.1 GB | | 17.5 s | | |
+| TurboFieldfare, default settings | 1.42 GB | | 63.9 s | | |
+| slipstream, 8 of 256 cached | 0.6 GB | | | | |
+| slipstream, 16 of 256 cached (default) | 1.90 GB | | 18.5 s | | |
+| slipstream, 32 of 256 cached | 2.3 GB | | | | |
+| slipstream, 64 of 256 cached | 4.5 GB | | | | |
+| slipstream, 96 of 256 cached | 6.8 GB | | | | |
+| slipstream, 128 of 256 cached | 9.1 GB | | 17.5 s | | |
+| slipstream, 192 of 256 cached | 13.6 GB | | | | |
 | slipstream, KV resume | 1.90 GB | | 0.03 s | | |
 
 Sustained decode, in tokens per second:
@@ -76,14 +80,23 @@ Sustained decode, in tokens per second:
 | Ollama | | | | | |
 | LM Studio, MLX engine | | | | | |
 | SwiftLM | | | | | |
-| TurboFieldfare, its defaults | 1.42 GB | | 21.0 | | |
-| slipstream, defaults (16 of 256 experts cached) | 1.90 GB | | 25.3 | | |
-| slipstream, half the experts cached | up to 9.1 GB | 27.7 | 32.1 | 20.2 | 19.5 |
-| slipstream, KV resume | 1.90 GB | | ramps from cold | | |
+| TurboFieldfare, default settings | 1.42 GB | | 21.0 | | |
+| slipstream, 8 of 256 cached | 0.6 GB | | | | |
+| slipstream, 16 of 256 cached (default) | 1.90 GB | | 25.3 | | |
+| slipstream, 32 of 256 cached | 2.3 GB | | | | |
+| slipstream, 64 of 256 cached | 4.5 GB | | | | |
+| slipstream, 96 of 256 cached | 6.8 GB | | | | |
+| slipstream, 128 of 256 cached | 9.1 GB | 27.7 | 32.1 | 20.2 | 19.5 |
+| slipstream, 192 of 256 cached | 13.6 GB | | | | |
+| slipstream, KV resume | 1.90 GB | | slow until the cache warms | | |
 
-Caching half the experts instead of the default sixteenth is worth 27
-percent of decode speed, 25.3 to 32.1 tokens per second, and costs about
-7 GB. That is the dial.
+Caching 128 experts instead of the default 16 is worth 27 percent of
+decode speed, 25.3 to 32.1 tokens per second, for about 7 GB. That is the
+dial.
+
+"Slow until the cache warms" is the KV-resume tradeoff: restoring a cache
+skips prefill, and prefill is also what fills the expert cache, so the
+first tokens after a resume run against an empty one.
 
 Three caveats. The llama.cpp rows and the under-1k column used prompts of
 a few dozen tokens, so their prefill figures mean little. The ~12k and
@@ -121,15 +134,15 @@ days. Models age out; the pipeline compounds. See `playbook/`.
 
 Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt,
 every row on the same machine and the same prompt file. TurboFieldfare is
-the project slipstream forked from, run at its own defaults:
+the project slipstream forked from, at its default settings:
 
 | configuration | TTFT | decode | peak memory |
 | --- | --- | --- | --- |
 | mlx-lm, all weights resident | see below | 41.2 tok/s | 21.6 GB |
-| TurboFieldfare, its defaults | 63.9 s | 21.0 tok/s | 1.42 GB |
-| slipstream, its defaults | 18.5 s | 25.3 tok/s | 1.90 GB |
-| slipstream, half the experts cached | 17.5 s | 32.1 tok/s | up to 9.1 GB |
-| slipstream, resuming a saved KV cache | 0.03 s | ramps from cold | plus a 119 MB file |
+| TurboFieldfare, default settings | 63.9 s | 21.0 tok/s | 1.42 GB |
+| slipstream, 16 of 256 cached (default) | 18.5 s | 25.3 tok/s | 1.90 GB |
+| slipstream, 128 of 256 cached | 17.5 s | 32.1 tok/s | 9.1 GB |
+| slipstream, resuming a saved KV cache | 0.03 s | slow until the cache warms | plus a 119 MB file |
 
 The resident row is the tradeoff stated plainly: keeping all 19 GB of
 weights in memory buys roughly twice the decode speed, and costs eleven
