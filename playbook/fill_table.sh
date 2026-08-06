@@ -67,6 +67,20 @@ fi
 [ -x "$BIN" ] || { echo "build first: swift build -c release"; exit 1; }
 [ -f "$MODEL_GTURBO" ] || [ -d "$MODEL_GTURBO" ] || { echo "missing $MODEL_GTURBO"; exit 1; }
 
+# Level the page cache before ANY arm runs. Per-cell warmup fixes warmth
+# within a cell but not across the sweep: the cache keeps filling as the run
+# proceeds, so early arms are measured cold and late arms warm. The smoke run
+# on 2026-08-06 showed the drift control 31% above its own first reading for
+# exactly this reason. Streaming the model once up front starts every arm from
+# the same place. Reads the whole file, so it takes a minute on a cold cache.
+echo "=== pre-warming the page cache with the whole model ==="
+if [ -d "$MODEL_GTURBO" ]; then
+  find "$MODEL_GTURBO" -type f -exec cat {} + > /dev/null 2>&1
+else
+  cat "$MODEL_GTURBO" > /dev/null 2>&1
+fi
+echo "    done"
+
 echo "=== fill_table $(git rev-parse --short HEAD) $(date) ===" | tee "$OUT/meta.txt"
 sw_vers >> "$OUT/meta.txt"
 sysctl -n iogpu.wired_limit_mb | sed 's/^/wired_limit_mb: /' >> "$OUT/meta.txt"
