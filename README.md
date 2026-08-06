@@ -1,12 +1,19 @@
 # slipstream
 
-Fast Mixture-of-Experts inference on Apple Silicon, at any memory budget.
+Mixture-of-Experts inference on Apple Silicon: experts streamed from SSD,
+near-roofline Metal kernels, and a KV cache that survives the process.
 
-Big MoE models normally demand RAM the size of their weights. slipstream
-streams routed experts from SSD through a bounded cache instead, so a
-35B-parameter MoE runs in about 1 GB of RAM, and the same runtime scales
-smoothly up to fully resident weights when the machine has headroom. Memory
-is a dial, not an architecture choice.
+Qwen3.6-35B-A3B generates at 21 tokens per second on a base M5 MacBook and
+peaks at 1.9 GB of memory. Its weights are 18 GB. slipstream leaves them on
+SSD and streams only the eight experts each token routes to, through a
+bounded cache you size yourself, so memory becomes a dial rather than an
+architecture decision. A 2,940-token prompt takes 18.5 seconds to prefill
+the first time and 0.03 seconds on every run after that, because the KV
+cache persists to disk and reloads byte for byte. Underneath, the kernels
+are scored against this machine's measured ceilings rather than its spec
+sheet, which overstates memory bandwidth by 27 percent: decode attention
+now reads KV at about 90 percent of the real ceiling, and the output head
+at 93.
 
 ## Thesis
 
@@ -30,14 +37,24 @@ The durable asset is the playbook: a staged, scripted pipeline that turns
 a newly released open-weight MoE into a measured, optimized profile in
 days. Models age out; the pipeline compounds. See `playbook/`.
 
-## Measured state (M5, 10-core GPU, 24 GB, 2026-08-01)
+## Measured state (M5, 10-core GPU, 24 GB)
 
-Qwen3.6-35B-A3B, community long-synthesis case, warm:
+Qwen3.6-35B-A3B, community long-synthesis case, warm, 2,940-token prompt:
 
-| configuration | TTFT (3k prompt) | decode | RSS |
+| configuration | TTFT | decode | peak memory |
 | --- | --- | --- | --- |
-| upstream defaults | 63.3 s prefill | ~18 tok/s | 1.13 GB |
-| slipstream today | 17.5 s prefill | ~25 tok/s | scales with budget |
+| upstream defaults | 63.3 s | ~18 tok/s | 1.13 GB RSS |
+| slipstream, out of the box | 18.5 s | 21.4 tok/s | 1.90 GB |
+| slipstream, 128-slot expert cache | 17.5 s | ~25 tok/s | grows with the cache |
+| slipstream, resuming a saved KV cache | 0.03 s | ramps from cold | plus a 119 MB file |
+
+Upstream's figure is resident set size as they publish it; slipstream's is
+peak physical footprint, which counts GPU allocations that resident set
+size misses. Measured the same way, slipstream's resident set size is
+1.14 GB. The 128-slot and upstream rows were measured 2026-08-01, the rest
+2026-08-05. Resuming a KV cache restores the prompt exactly, byte for byte,
+but decode then starts against a cold expert cache, because prefill is
+what normally warms it. That tradeoff is item 4 in the roadmap below.
 
 Decode phase split at 128 cache slots (per token, 40.7 ms total):
 scheduling gaps ~9 ms, expert I/O await 7.8 ms, expert FFN 6.5 ms,
