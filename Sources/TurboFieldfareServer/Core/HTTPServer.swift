@@ -44,26 +44,30 @@ public actor TurboFieldfareHTTPServer {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 childChannels.insert(channel)
-                // NOTE: withPipeliningAssistance gates reads while a response
-                // is outstanding, so the socket is not polled during a long
-                // generation and a client that disappears is invisible until
-                // the work finishes. Disabling it does make disconnects land
-                // (verified: CPU drops to 0 within 5 s), but it breaks
-                // response ordering for pipelined requests, which
-                // pipelinedStreamingThenHealthResponsesRemainOrdered covers.
-                // The fix needs a front-of-pipeline handler that can poll for
-                // EOF without disturbing ordering; see next-steps.
-                return channel.pipeline.configureHTTPServerPipeline(
-                    withPipeliningAssistance: true,
-                    withErrorHandling: true
+                // Pipelining assistance suppresses read() while a response is
+                // outstanding, which keeps pipelined responses ordered but
+                // also stops the socket being polled during a long
+                // generation, hiding a client that has disconnected. The
+                // watcher is added FIRST so its own read() reaches the head
+                // without passing through that suppression. See
+                // ClientDisconnectWatcher for the incident behind this.
+                let cancellation = GenerationCancellation()
+                return channel.pipeline.addHandler(
+                    ClientDisconnectWatcher(cancellation: cancellation)
                 ).flatMap {
+                    channel.pipeline.configureHTTPServerPipeline(
+                        withPipeliningAssistance: true,
+                        withErrorHandling: true
+                    )
+                }.flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         modelID: modelID,
                         chatDialect: chatDialect,
                         backend: backend,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
-                        childChannels: childChannels))
+                        childChannels: childChannels,
+                        cancellation: cancellation))
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -144,19 +148,22 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var body = ByteBuffer()
     private var oversized = false
     private var activeTask: Task<Void, Never>?
+    private let cancellation: GenerationCancellation
 
     init(modelID: String,
          chatDialect: ChatDialect = .gemma,
          backend: any ServerInferenceBackend,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
-         childChannels: ChildChannelRegistry) {
+         childChannels: ChildChannelRegistry,
+         cancellation: GenerationCancellation = GenerationCancellation()) {
         self.modelID = modelID
         self.chatDialect = chatDialect
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.childChannels = childChannels
+        self.cancellation = cancellation
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -280,7 +287,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                finishReason: nil))
             }
             activeTask = childChannels.startTask {
-                defer { streamState.stop() }
+                defer { streamState.stop(); self.cancellation.finish() }
                 do {
                     let completion = try await self.coordinator.run(onQueued: startStream) {
                         startStream()
@@ -320,6 +327,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                           stream: streamState.isStarted)
                 }
             }
+            if let activeTask { cancellation.begin(activeTask) }
         } catch let error as ServerRequestError {
             writeError(context,
                        status: error == .unknownModel ? .notFound : .badRequest,
@@ -359,7 +367,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                                                inputTokens: 0))
             }
             activeTask = childChannels.startTask {
-                defer { streamState.stop() }
+                defer { streamState.stop(); self.cancellation.finish() }
                 do {
                     let completion = try await self.coordinator.run(onQueued: startStream) {
                         startStream()
@@ -417,6 +425,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                           stream: streamState.isStarted)
                 }
             }
+            if let activeTask { cancellation.begin(activeTask) }
         } catch let error as AnthropicAdapterError {
             if case .unsupported(let message) = error {
                 writeJSON(context, status: .badRequest,
