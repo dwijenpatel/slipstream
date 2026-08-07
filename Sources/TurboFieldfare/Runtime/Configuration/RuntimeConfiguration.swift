@@ -35,17 +35,11 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
 
-    /// 64 measured optimal on the M5 24 GB host: 27.76 tok/s against 25.12
-    /// at 16, a 6-point sweep at 3k with the drift control at 2.2%. It is NOT
-    /// the best hit rate — 192 slots hits 97.7% against 64's 78.7% and is the
-    /// SLOWEST arm at 17.86, because past ~64 this cache evicts the OS page
-    /// cache that was absorbing its own misses. The two compete for the same
-    /// RAM, so the optimum is a property of the host, not of the model.
-    public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
-                rdadvisePolicy: RDAdvicePolicyMode = .off,
-                prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 128,
+    public init(expertCacheSlots: Int = RuntimeDefaults.expertCacheSlots,
+                expertCachePolicy: RuntimeExpertCachePolicy = RuntimeDefaults.expertCachePolicy,
+                rdadvisePolicy: RDAdvicePolicyMode = RuntimeDefaults.rdadvisePolicy,
+                prefillEnabled: Bool = RuntimeDefaults.prefillEnabled,
+                prefillChunkTokens: Int = RuntimeDefaults.prefillChunkTokens,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),

@@ -1,18 +1,25 @@
 import Foundation
+import TurboFieldfare
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 1
+    /// 2: the expert-cache default moved 16 -> 64 on measured evidence
+    /// (+10.7% on a real agent workload). A stored settings file pins its own
+    /// value, so without this bump every existing install would keep running
+    /// 16 and never see the change. Bumping invalidates the file and
+    /// re-defaults it, which is why the tuning fields below take their values
+    /// from RuntimeDefaults rather than repeating literals.
+    static let currentVersion = 2
 
     var version: Int = currentVersion
     var contextTokens: Int = AppContextLengthOption.fourK.tokens
-    var expertCacheSlots: Int = 16
+    var expertCacheSlots: Int = RuntimeDefaults.expertCacheSlots
     var temperature: Double = 0.2
     var topKEnabled: Bool = true
     var topK: Int = 64
     var topPEnabled: Bool = true
     var topP: Double = 0.95
-    var prefillEnabled: Bool = true
+    var prefillEnabled: Bool = RuntimeDefaults.prefillEnabled
 
     func isValid() -> Bool {
         version == Self.currentVersion

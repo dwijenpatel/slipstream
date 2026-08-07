@@ -39,7 +39,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                expertCacheSlots: Int = 16,
+                expertCacheSlots: Int = RuntimeDefaults.expertCacheSlots,
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
                 kvSnapshot: String? = nil) {
@@ -138,7 +138,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var expertCacheSlots = 16
+        var expertCacheSlots = RuntimeDefaults.expertCacheSlots
         var rdadvise = "off"
         var prefillChunk = PrefillChunkChoice.auto
         var kvSnapshot: String?

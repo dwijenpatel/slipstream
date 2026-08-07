@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
 @Suite struct AppModelTests {
@@ -16,7 +17,10 @@ import Testing
         #expect(request.maxNewTokens == 4_096)
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
-        #expect(request.runtimeOptions.expertCacheSlots == 16)
+        // Reference the constant, not a literal: a literal here is an eighth
+        // copy of the default and would drift the same way the other seven did.
+        #expect(request.runtimeOptions.expertCacheSlots
+                == RuntimeDefaults.expertCacheSlots)
         #expect(request.runtimeOptions.expertCachePolicy == .lfu)
         #expect(request.runtimeOptions.rdadvisePolicy == .off)
         #expect(request.runtimeOptions.prefillEnabled)

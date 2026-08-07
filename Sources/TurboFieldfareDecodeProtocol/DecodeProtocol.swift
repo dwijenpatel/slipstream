@@ -8,7 +8,13 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var rdadvisePolicy: String
     public var modelVerification: String
 
-    public init(expertCacheSlots: Int = 16,
+    /// These defaults are decorative: the only production construction
+    /// (DecodeServiceInferenceClient) passes every field explicitly from
+    /// AppRuntimeOptions. They are literals rather than RuntimeDefaults
+    /// because this module deliberately has no dependencies — it is the wire
+    /// format. RuntimeDefaultsDriftTests pins them to the canonical values,
+    /// so they cannot rot silently.
+    public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
