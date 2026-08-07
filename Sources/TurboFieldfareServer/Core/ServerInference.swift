@@ -235,6 +235,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             || request.messages.contains {
                 $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
             }
+        // Cumulative per runner, so snapshot and difference to get this
+        // request's share.
+        let expertHits0 = runner.expertHits
+        let expertMisses0 = runner.expertMisses
+        let io0 = runner.totalIoNanos
         let renderStart = Date()
         let promptIDs: [Int32]
         if needsToolTemplate {
@@ -389,6 +394,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             // anything here is time the client waits that ttft never showed.
             + String(format: " render=%.3fs match=%.3fs prepare=%.3fs",
                      renderSeconds, matchSeconds, result.prepareSeconds)
+            // Routed-expert slot cache for THIS request. A miss is one expert
+            // read from disk, so miss count is the paging load and hit rate is
+            // how well the conversation's routing reuses resident experts.
+            + {
+                let hits = runner.expertHits - expertHits0
+                let misses = runner.expertMisses - expertMisses0
+                let total = hits + misses
+                let rate = total > 0 ? Double(hits) / Double(total) * 100 : 0
+                return String(
+                    format: " expert_hit=%.1f%% expert_miss=%llu io_await=%.2fs",
+                    rate, misses,
+                    Double(runner.totalIoNanos - io0) / 1e9)
+            }()
             + "\n").utf8))
 
         if promptCacheMode == .singlePrefix {

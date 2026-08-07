@@ -10,10 +10,14 @@
 #   us two contaminated sweeps already.
 # - Page cache is the dominant confound on a streaming runtime: the SAME
 #   config measured 22.15 tok/s early in a session and 25.27 late, a 14%
-#   swing from nothing but warmth. So every cell runs twice and only the
-#   second run is recorded, and arm 1 is re-run at the end as a drift
-#   control. If the control disagrees with its first reading by more than
-#   5%, the whole sweep measured machine state, not the arms.
+#   swing from nothing but warmth. So the whole arm list is run in
+#   round-robin passes (--passes, default 2) and only the last pass is
+#   recorded, and arm 1 is re-run at the end as a drift control. If the
+#   control disagrees with its first reading by more than 5%, the whole
+#   sweep measured machine state, not the arms.
+#   Per-CELL warmup was tried first and is not enough: the confound
+#   accumulates across cells, not within them, and an ordered sweep with
+#   double-run cells still drifted 24% on the control (2026-08-06).
 # - Every measured run is a fresh process. In-process sigma understates
 #   cross-process spread by a lot.
 #
@@ -41,6 +45,9 @@ BASELINE_BIN="${BASELINE_BIN:-$HOME/repos/ss-baseline/.build/release/TurboFieldf
 BIN="$REPO/.build/release/slipstream"
 
 MAXNEW=512
+# Round-robin passes over the arm list; only the last is recorded. 2 is the
+# minimum that leaves every arm equally warm, 3 if the control still drifts.
+PASSES=2
 SMOKE=0
 ONLY=".*"
 CONTEXTS="1k,3k,12k,24k"
@@ -49,6 +56,7 @@ while [ $# -gt 0 ]; do
     --smoke) SMOKE=1; MAXNEW=32; shift;;
     --only) ONLY="$2"; shift 2;;
     --contexts) CONTEXTS="$2"; shift 2;;
+    --passes) PASSES="$2"; shift 2;;
     *) echo "unknown flag: $1"; exit 2;;
   esac
 done
@@ -108,18 +116,18 @@ run_gturbo() { # arm binary context extra-args...
   local arm=$1 binary=$2 ctx=$3; shift 3
   local p; p=$(prompt_for "$ctx")
   [ -f "$p" ] || { echo "    missing prompt $p"; return; }
-  for run in warm measured; do
-    local log="$OUT/$arm.$ctx.$run.log"
-    if [ "$run" = "measured" ]; then
-      /usr/bin/time -l "$binary" --model "$MODEL_GTURBO" --messages-file "$p" \
-        --max-new "$MAXNEW" --max-context 32768 --temperature 0 --seed 20260723 \
-        "$@" >/dev/null 2>"$log"
-    else
-      "$binary" --model "$MODEL_GTURBO" --messages-file "$p" \
-        --max-new "$MAXNEW" --max-context 32768 --temperature 0 --seed 20260723 \
-        "$@" >/dev/null 2>"$log"
-    fi
-  done
+  # Non-final passes are warm-up for the WHOLE arm list, not for this cell:
+  # they run once and record nothing. Only the final pass is measured.
+  if [ "$PASS" != "$PASSES" ]; then
+    "$binary" --model "$MODEL_GTURBO" --messages-file "$p" \
+      --max-new "$MAXNEW" --max-context 32768 --temperature 0 --seed 20260723 \
+      "$@" >/dev/null 2>"$OUT/$arm.$ctx.pass$PASS.log"
+    return
+  fi
+  local log="$OUT/$arm.$ctx.measured.log"
+  /usr/bin/time -l "$binary" --model "$MODEL_GTURBO" --messages-file "$p" \
+    --max-new "$MAXNEW" --max-context 32768 --temperature 0 --seed 20260723 \
+    "$@" >/dev/null 2>"$log"
   local foot ttft dec toks peak
   foot=$(grep -o '\[stop=[^]]*\]' "$OUT/$arm.$ctx.measured.log" | head -1)
   toks=$(echo "$foot" | sed -n 's/.*prefill=\([0-9]*\)tok.*/\1/p')
@@ -193,6 +201,17 @@ for ctx in "${CTXS[@]}"; do
   echo ""
   echo "=== context $ctx ==="
 
+  # Round-robin over the WHOLE arm list, recording only the last pass.
+  # Running each cell twice back to back was not enough: the confound is
+  # page-cache warming of an 18 GB weight file, which accumulates across
+  # cells over a whole sweep rather than within one. On 2026-08-06 an
+  # ordered sweep with per-cell double-runs still drifted 24% on the
+  # control (18.53 -> 22.99 tok/s, identical config), which is larger than
+  # the spread between the arms it was trying to measure. Passing over
+  # every arm before recording any of them leaves them equally warm.
+  for PASS in $(seq 1 "$PASSES"); do
+  [ "$PASSES" -gt 1 ] && echo "  -- pass $PASS of $PASSES$([ "$PASS" = "$PASSES" ] && echo ' (recorded)')"
+
   # 8 is omitted deliberately: the prefill routed-tile scheduler refuses
   # fewer than 16 slots ("needs 16 slots, has 8"), so it is unrunnable
   # rather than merely slow.
@@ -230,6 +249,7 @@ for ctx in "${CTXS[@]}"; do
     echo "    WARNING: resident arm peaks near the wired limit; watch memory"
     run_mlxlm "$ctx"
   fi
+  done   # PASS
 done
 
 # ---- drift control ---------------------------------------------------------

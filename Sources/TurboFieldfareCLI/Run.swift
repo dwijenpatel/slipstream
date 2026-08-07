@@ -133,6 +133,15 @@ public func run(args: Args,
             lines += String(format: "%.0f", total) + " ms]\n"
             lines += "  cb1 encode+commit: " + ms(runner.totalCb1Nanos) + " ms\n"
             lines += "  expert io await:   " + ms(runner.totalIoNanos) + " ms\n"
+            // The slot cache's own outcome, so a slots sweep reports the
+            // mechanism (what the cache held) beside the effect (what it
+            // waited for), instead of leaving the curve unexplained.
+            let eHits = runner.expertHits, eMisses = runner.expertMisses
+            let eTotal = eHits + eMisses
+            lines += "  expert cache:      "
+            lines += String(format: "%.1f%% hit, %llu miss of %llu\n",
+                            eTotal > 0 ? Double(eHits) / Double(eTotal) * 100 : 0,
+                            eMisses, eTotal)
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
             lines += "  unaccounted (GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"

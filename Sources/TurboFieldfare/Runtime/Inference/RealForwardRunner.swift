@@ -610,6 +610,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public private(set) var totalIoNanos: UInt64 = 0
+    /// Routed-expert slot-cache outcomes, summed over every layer of every
+    /// forward. A miss is one expert read from disk. Cumulative per runner,
+    /// so a caller wanting a per-request figure must difference them.
+    public private(set) var expertHits: UInt64 = 0
+    public private(set) var expertMisses: UInt64 = 0
     // True GPU execution time per decode bucket, from MTLCommandBuffer
     // gpuStartTime/gpuEndTime. CPU-side encode counters above cannot
     // attribute the wait time; these can.
@@ -2647,6 +2652,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let plannedFetch = canPlanPhase1HitSplit
                 ? try model.planRoutedExperts(layer: L, experts: experts)
                 : nil
+            if let plan = plannedFetch {
+                expertHits &+= UInt64(plan.hits)
+                expertMisses &+= UInt64(plan.misses.count)
+            }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
             var phase1HitSplitRoutedBufs: [MTLBuffer] = []
