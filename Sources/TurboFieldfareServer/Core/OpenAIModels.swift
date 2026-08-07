@@ -300,7 +300,11 @@ public enum OpenAIRequestValidator {
         // 8192, not 4096: a single agent turn writing a source file generated
         // 3,193 tokens in one response on 2026-08-06, and a truncated file is
         // a failed step that costs a whole retry.
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 8192
+        // 4096, lowered from 8192 on measured evidence: normal turns peak near
+        // 1k, and one turn that reasoned to the 8192 cap produced no tool call,
+        // was discarded by the client, and cost 39% of a run's wall clock. A
+        // higher cap does not rescue such a turn, it only makes it dearer.
+        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",

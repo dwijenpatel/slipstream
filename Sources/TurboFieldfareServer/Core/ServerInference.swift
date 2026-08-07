@@ -413,7 +413,19 @@ public actor ServerModelSession: ServerInferenceBackend {
                     rate, misses,
                     Double(runner.totalIoNanos - io0) / 1e9)
             }()
+            + (decoder.map { String(format: " reasoning=%d", $0.reasoningTokens) } ?? "")
             + "\n").utf8))
+
+        // The reasoning itself, which the client never receives. Written as a
+        // delimited block AFTER the request line so per-request line parsing
+        // and byte-offset log slicing both still work. Without this the most
+        // expensive thing the model does is also the only thing we cannot see.
+        if let decoder, !decoder.reasoningText.isEmpty {
+            FileHandle.standardError.write(Data((
+                "--- reasoning \(decoder.reasoningTokens) tokens ---\n"
+                + decoder.reasoningText
+                + "\n--- end reasoning ---\n").utf8))
+        }
 
         if promptCacheMode == .singlePrefix {
             promptCache.publish(

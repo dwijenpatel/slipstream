@@ -51,6 +51,29 @@ struct ChatMLDecoderTests {
         try d.finish()
     }
 
+    /// Suppressing reasoning from the CLIENT is correct; dropping it entirely
+    /// left us unable to see the most expensive thing the model does.
+    @Test("Reasoning is captured even though it is withheld")
+    func reasoningIsCaptured() throws {
+        let d = StructuredAssistantDecoder(tokenizer: tok,
+                                           allowedTools: [],
+                                           idGenerator: { "call_fixed" },
+                                           thinkingPreopened: true)
+        let events = try feed("weighing the options</think>\n\nthe answer", into: d)
+        #expect(visibleText(events) == "the answer")
+        #expect(d.reasoningText == "weighing the options")
+        #expect(d.reasoningTokens > 0)
+        try d.finish()
+    }
+
+    @Test("A turn with no reasoning reports none")
+    func noReasoning() throws {
+        let d = decoder(allowedTools: [])
+        _ = try feed("just an answer", into: d)
+        #expect(d.reasoningText.isEmpty)
+        #expect(d.reasoningTokens == 0)
+    }
+
     @Test("Visible text streams through unchanged")
     func plainText() throws {
         let d = decoder()

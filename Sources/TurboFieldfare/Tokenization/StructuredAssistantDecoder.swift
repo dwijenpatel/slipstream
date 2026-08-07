@@ -21,6 +21,16 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var emittedCalls = 0
     private var failed = false
     private var trimmingLeadingNewlines = false
+    private var reasoning = ""
+    private var reasoningTokenCount = 0
+
+    /// Reasoning is withheld from the client by design, which also made it
+    /// invisible to US: one turn spent 8192 tokens thinking, produced no tool
+    /// call, was discarded by the client, and cost 39% of a run's wall clock —
+    /// and nothing anywhere recorded what it had been reasoning about. Keep it
+    /// so the cost of thinking can be inspected instead of inferred.
+    public var reasoningText: String { reasoning }
+    public var reasoningTokens: Int { reasoningTokenCount }
 
     /// Kept as a distinct entry point rather than defaulting `thinkingPreopened`
     /// on the designated init below: a default changes the mangled symbol and
@@ -110,6 +120,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         switch channel {
         case .thought:
+            reasoning += delta
+            reasoningTokenCount += 1
             return []
         case .visible:
             return delta.isEmpty ? [] : [.content(delta)]
@@ -179,7 +191,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             trimmingLeadingNewlines = true
             return []
         }
-        guard channel != .thought else { return [] }
+        guard channel != .thought else {
+            reasoning += delta
+            reasoningTokenCount += 1
+            return []
+        }
         var visible = delta
         if trimmingLeadingNewlines {
             visible = String(visible.drop(while: { $0 == "\n" }))
