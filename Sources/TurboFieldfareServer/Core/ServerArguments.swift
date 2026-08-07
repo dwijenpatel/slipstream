@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
@@ -10,6 +11,11 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// Routed-expert slots per layer. Exposed because it is the largest
+    /// decode dial the server has and the optimum is machine-specific: it is
+    /// set by RAM competition between this cache and the OS page cache, not
+    /// by hit rate, so it has to be measured per host rather than assumed.
+    public let expertCacheSlots: Int
 
     public static let usage = """
     usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
@@ -23,6 +29,11 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --expert-cache-slots <n>
+                             Routed-expert slots per layer (default 64).
+                             More is not always faster: past the point where
+                             this cache starts evicting the OS page cache,
+                             throughput falls even as hit rate rises.
       --help                 Show this help.
     """
 
@@ -33,6 +44,7 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var expertCacheSlots = RuntimeConfiguration().expertCacheSlots
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -72,6 +84,13 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--expert-cache-slots":
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--expert-cache-slots is not supported")
+                }
+                expertCacheSlots = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -82,7 +101,8 @@ public struct ServerArguments: Equatable, Sendable {
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
-                               promptCacheMode: promptCacheMode)
+                               promptCacheMode: promptCacheMode,
+                               expertCacheSlots: expertCacheSlots)
     }
 }
 

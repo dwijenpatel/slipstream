@@ -60,7 +60,10 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
 
-    public init(expertCacheSlots: Int = 16,
+    /// Tracks RuntimeConfiguration's default (64); a test pins the two
+    /// together, because the app resolving to anything else would silently
+    /// ship a different runtime than the server and CLI.
+    public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,

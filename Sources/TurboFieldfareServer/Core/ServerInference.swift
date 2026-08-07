@@ -128,7 +128,8 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            expertCacheSlots: Int) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -151,6 +152,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // sampling config (see RawCompletion), so the server no longer has to
         // give it up wholesale to be able to serve temperature > 0.
         let runtime = RuntimeConfiguration(
+            expertCacheSlots: expertCacheSlots,
             prefillChunkTokens: RuntimeConfiguration.allowedPrefillChunkTokens.last!,
             forceLogitsHead: false)
         let model = try Model.load(

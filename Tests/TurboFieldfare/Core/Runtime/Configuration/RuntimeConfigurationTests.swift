@@ -5,7 +5,11 @@ import Testing
     @Test func productionDefaultsAreStable() {
         let runtime = RuntimeConfiguration.production
         #expect(runtime.fp16RingEnabled)
-        #expect(runtime.expertCacheSlots == 16)
+        // 64, not the 16 this pinned for months: measured 27.76 tok/s against
+        // 25.12 at 16 (6-point sweep, drift control 2.2%). Deliberately NOT
+        // the best hit rate — 192 hits 97.7% and is the slowest arm, because
+        // past ~64 this cache evicts the page cache serving its own misses.
+        #expect(runtime.expertCacheSlots == 64)
         #expect(runtime.expertCachePolicy == .lfu)
         #expect(runtime.rdadvisePolicy == .off)
         #expect(!runtime.rdadviseEnabled)
