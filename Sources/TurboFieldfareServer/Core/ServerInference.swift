@@ -385,8 +385,12 @@ public actor ServerModelSession: ServerInferenceBackend {
             ? Double(result.newTokens) / result.decodeSeconds
             : 0
         let prefillRate = ttft > 0 ? Double(result.computedPrefillTokens) / ttft : 0
+        // Timestamped so a session log can be sliced per task afterwards. One
+        // server serves many tasks, and without this the requests of different
+        // tasks are indistinguishable in a single file.
+        let stamp = ISO8601DateFormatter().string(from: Date())
         FileHandle.standardError.write(Data((
-            "request prompt=\(result.prefillTokens) cached=\(result.cachedPromptTokens) "
+            "\(stamp) request prompt=\(result.prefillTokens) cached=\(result.cachedPromptTokens) "
             + "new_prompt=\(result.computedPrefillTokens) completion=\(result.newTokens) "
             + String(format: "ttft=%.2fs prefill=%.1ftok/s decode=%.1ftok/s total=%.2fs",
                      ttft, prefillRate, decodeRate, ttft + result.decodeSeconds)
