@@ -1199,4 +1199,224 @@ kernel void attention_prefill_full_tensorops_2d_validity_v2(
         row_max, row_sum, row_old_scale);
 }
 
+
+// ============================================================================
+// Causal prefill attention at head dim 256 on the tensor units (Apple10).
+//
+// Ported from gpu-kernel's prefill-attention champion (evolve/prefill_attn/
+// seeds/champion_c3.py, layout 0: BQ 32, BK 128, 8 simdgroups, fp32 scores in
+// threadgroup memory). Both matmuls run on the tensor units; O stays in
+// registers across key tiles. What the port changed: sequence lengths,
+// head counts, and strides are runtime parameters instead of compiled-in
+// constants, and the query and key/value views carry the runtime's row
+// strides (token-major, head-minor).
+//
+// Invariants kept from the source:
+//  - kv-head-major grid: the REP query heads of one kv head are innermost, so
+//    resident threadgroups share one pair of K/V streams.
+//  - the final query tile overlaps at M-BQ, and the final key tile overlaps at
+//    L-BK and masks keys below the previous tile's end, so no row past M or L
+//    is ever read. The host dispatches this kernel only when M >= BQ and
+//    L >= BK.
+//  - causal query row i of the tile sits at absolute position L-M+q0+i.
+//  - online softmax in fp32 with a threadgroup-uniform rescale skip; fp16
+//    P and V operands; every barrier at uniform top level.
+// ============================================================================
+
+constant constexpr int kHD256_BQ = 32;
+constant constexpr int kHD256_BK = 128;
+constant constexpr int kHD256_BD = 256;
+constant constexpr int kHD256_TG = 256;
+constant constexpr int kHD256_PARTS = 8;
+constant constexpr int kHD256_NPART = kHD256_BK / kHD256_PARTS;
+constant constexpr int kHD256_RSTEP = kHD256_TG / kHD256_PARTS;
+constant constexpr int kHD256_CAPX = 2 * ((kHD256_BQ * kHD256_BD) / kHD256_TG) + 16;
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void attention_prefill_causal_tensorops_hd256(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device half* O [[buffer(3)]],
+    constant PrefillAttentionParams& p [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tgi [[threadgroup_position_in_grid]]
+) {
+    constexpr int BQ = kHD256_BQ, BK = kHD256_BK, BD = kHD256_BD;
+    constexpr int TGS = kHD256_TG, PARTS = kHD256_PARTS;
+    constexpr int NPART = kHD256_NPART, RSTEP = kHD256_RSTEP, CAPX = kHD256_CAPX;
+
+    const int M = int(p.queryCount);
+    const int L = int(p.kvValidCount);
+    const int REP = int(p.numQHeads / p.numKVHeads);
+    const int NT = (M + BQ - 1) / BQ;
+    const float SC = p.scale * 1.4426950408889634f;
+    const int32_t qStride = int32_t(p.qTokenStrideElements);
+    const int32_t kvStride = int32_t(p.kvTokenStrideElements);
+    const size_t oStride = size_t(p.oTokenStrideElements);
+
+    const uint rr   = tgi % uint(REP);          // kv-head-major: reps innermost
+    const uint rest = tgi / uint(REP);
+    const uint qi   = rest % uint(NT);
+    const uint hk   = rest / uint(NT);
+    const uint h    = hk * uint(REP) + rr;
+    const uint qt   = uint(NT - 1) - qi;        // heaviest causal tile first
+    const uint q0   = (M >= BQ) ? min(qt * uint(BQ), uint(M - BQ)) : 0u;
+
+    threadgroup half  Ps[BQ * BK];
+    threadgroup float Ss[BQ * BK];
+    threadgroup float ms[BQ], ls[BQ], cs[BQ];
+    threadgroup int   chg;
+    threadgroup float *SB = Ss;
+
+    using device_half_tensor =
+        tensor<device half, dextents<int32_t, 2>, tensor_inline>;
+    using tg_half_tensor =
+        tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+    using tg_float_tensor =
+        tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>;
+
+    auto tS = tg_float_tensor(Ss, dextents<int32_t, 2>(BK, BQ));
+    auto tPs = tg_half_tensor(Ps, dextents<int32_t, 2>(BK, BQ));
+
+    for (uint i = tid; i < uint(BQ); i += uint(TGS)) {
+        ms[i] = -INFINITY; ls[i] = 0.0f; cs[i] = 0.0f;
+    }
+    if (tid == 0) { chg = 0; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    auto tQ = device_half_tensor(
+        (device half*)(Q + size_t(q0) * size_t(qStride) + size_t(h) * BD),
+        dextents<int32_t, 2>(BD, BQ),
+        array<int32_t, 2>({1, qStride}));
+
+    constexpr auto dS = matmul2d_descriptor(BQ, BK, BD, false, true, false);
+    constexpr auto dO = matmul2d_descriptor(BQ, BD, BK, false, false, false);
+    matmul2d<dS, execution_simdgroups<8>> opS;
+    matmul2d<dO, execution_simdgroups<8>> opO;
+
+    auto tV0 = device_half_tensor(
+        (device half*)(V + size_t(hk) * BD),
+        dextents<int32_t, 2>(BD, BK),
+        array<int32_t, 2>({1, kvStride}));
+    auto oT  = opO.get_destination_cooperative_tensor<decltype(tPs), decltype(tV0), float>();
+    auto pvT = opO.get_destination_cooperative_tensor<decltype(tPs), decltype(tV0), float>();
+    ushort rw[CAPX];
+    #pragma unroll
+    for (uint16_t i = 0; i < oT.get_capacity(); ++i) {
+        if (oT.is_valid_element(i)) oT[i] = 0.0f;
+        rw[(i < CAPX) ? i : 0] = (ushort)oT.get_multidimensional_index(i)[1];
+    }
+
+    const int qlast    = L - M + int(q0) + BQ - 1;
+    const int last_key = min(L - 1, qlast);
+    const int n_full   = L / BK;
+    const int tail0    = n_full * BK;
+    const int TAILK    = (L - BK > 0) ? (L - BK) : 0;
+
+    for (int t = 0; t <= n_full; ++t) {
+        const bool is_tail = (t == n_full);
+        if (is_tail && tail0 == L) { break; }        // uniform per threadgroup
+        const int k0 = is_tail ? TAILK : (t * BK);
+        if (k0 > last_key) { break; }                // uniform per threadgroup
+        const int skip_below = is_tail ? tail0 : 0;
+        const bool full = (skip_below == 0) && (k0 + BK <= L) &&
+                          (k0 + BK - 1 <= (L - M + int(q0)));
+
+        auto tK = device_half_tensor(
+            (device half*)(K + size_t(k0) * size_t(kvStride) + size_t(hk) * BD),
+            dextents<int32_t, 2>(BD, BK),
+            array<int32_t, 2>({1, kvStride}));
+        opS.run(tQ, tK, tS);
+        if (tid == 0) { chg = 0; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint row = tid / uint(PARTS); row < uint(BQ); row += uint(RSTEP)) {
+            const uint cbase = (tid % uint(PARTS)) * uint(NPART);
+            const uint base  = row * uint(BK) + cbase;
+            const int  qpos  = L - M + int(q0) + int(row);
+            float mx_ = -INFINITY;
+            if (full) {
+                #pragma unroll
+                for (int j = 0; j < NPART; ++j) mx_ = max(mx_, (float)SB[base + j] * SC);
+            } else {
+                #pragma unroll
+                for (int j = 0; j < NPART; ++j) {
+                    const int kj = k0 + int(cbase) + j;
+                    if (!(kj < skip_below || kj >= L || kj > qpos))
+                        mx_ = max(mx_, (float)SB[base + j] * SC);
+                }
+            }
+            #pragma unroll
+            for (ushort d = 1; d < PARTS; d <<= 1) { mx_ = max(mx_, simd_shuffle_xor(mx_, d)); }
+
+            const float m_old = ms[row];
+            const float m_new = (mx_ == -INFINITY) ? m_old : max(m_old, mx_);
+            const float c = (m_old == -INFINITY || m_new == -INFINITY)
+                          ? 0.0f : exp2(m_old - m_new);
+            float sm = 0.0f;
+            if (full) {
+                #pragma unroll
+                for (int j = 0; j < NPART; ++j) {
+                    const float pr = exp2((float)SB[base + j] * SC - m_new);
+                    Ps[base + j] = (half)pr; sm += pr;
+                }
+            } else {
+                #pragma unroll
+                for (int j = 0; j < NPART; ++j) {
+                    const int kj = k0 + int(cbase) + j;
+                    float pr = 0.0f;
+                    if (m_new != -INFINITY &&
+                        !(kj < skip_below || kj >= L || kj > qpos))
+                        pr = exp2((float)SB[base + j] * SC - m_new);
+                    Ps[base + j] = (half)pr; sm += pr;
+                }
+            }
+            #pragma unroll
+            for (ushort d = 1; d < PARTS; d <<= 1) { sm += simd_shuffle_xor(sm, d); }
+            if (tid % uint(PARTS) == 0) {
+                ls[row] = ls[row] * c + sm; ms[row] = m_new; cs[row] = c;
+                if (m_new != m_old) { chg = 1; }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        auto tV = device_half_tensor(
+            (device half*)(V + size_t(k0) * size_t(kvStride) + size_t(hk) * BD),
+            dextents<int32_t, 2>(BD, BK),
+            array<int32_t, 2>({1, kvStride}));
+        opO.run(tPs, tV, pvT);
+        // chg was written before the barrier above, so it is threadgroup-
+        // uniform here: this branch is uniform and contains no barrier.
+        if (chg != 0) {
+            #pragma unroll
+            for (uint16_t i = 0; i < oT.get_capacity(); ++i) {
+                if (oT.is_valid_element(i)) {
+                    const uint rq = (i < CAPX) ? (uint)rw[i]
+                                  : (uint)oT.get_multidimensional_index(i)[1];
+                    oT[i] = fma(oT[i], cs[rq], pvT[i]);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (uint16_t i = 0; i < oT.get_capacity(); ++i) {
+                if (oT.is_valid_element(i)) oT[i] += pvT[i];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    #pragma unroll
+    for (uint16_t i = 0; i < oT.get_capacity(); ++i) {
+        if (oT.is_valid_element(i)) {
+            auto ids = oT.get_multidimensional_index(i);
+            const uint r = (uint)ids[1], c = (uint)ids[0];
+            if (int(q0 + r) < M) {
+                const float d = (ls[r] > 0.0f) ? ls[r] : 1.0f;
+                O[(size_t(q0) + r) * oStride + size_t(h) * BD + c] = (half)(oT[i] / d);
+            }
+        }
+    }
+}
+
 #endif
