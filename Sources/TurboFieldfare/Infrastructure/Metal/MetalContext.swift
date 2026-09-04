@@ -7,6 +7,7 @@ enum MetalError: Error, CustomStringConvertible {
     case missingShaderResource(String)
     case missingFunction(String)
     case libraryCompileFailed(String)
+    case commandBufferFailed(String)
 
     public var description: String {
         switch self {
@@ -15,8 +16,58 @@ enum MetalError: Error, CustomStringConvertible {
         case .missingShaderResource(let n): return "Shader resource missing: \(n)"
         case .missingFunction(let n):     return "Metal function missing in library: \(n)"
         case .libraryCompileFailed(let s):return "Metal library compile failed: \(s)"
+        case .commandBufferFailed(let s): return "Metal command buffer failed: \(s)"
         }
     }
+}
+
+func metalCommandBufferStatusName(_ status: MTLCommandBufferStatus) -> String {
+    switch status {
+    case .notEnqueued: return "notEnqueued"
+    case .enqueued:    return "enqueued"
+    case .committed:   return "committed"
+    case .scheduled:   return "scheduled"
+    case .completed:   return "completed"
+    case .error:       return "error"
+    @unknown default:  return "unknown(\(status.rawValue))"
+    }
+}
+
+/// The diagnostic for a command buffer that did not complete cleanly, or nil
+/// when it did. Status and error are checked separately: a buffer the driver
+/// killed can report `.error` with no error object, and a completed buffer
+/// can still carry one.
+func metalCommandBufferFailureDetail(label: String?,
+                                     status: MTLCommandBufferStatus,
+                                     error: (any Error)?) -> String? {
+    if status == .completed && error == nil { return nil }
+
+    var parts = ["label=\(label.map { $0.isEmpty ? "<empty>" : $0 } ?? "<none>")"]
+    parts.append("status=\(metalCommandBufferStatusName(status))")
+    if let error {
+        let nsError = error as NSError
+        parts.append("domain=\(nsError.domain)")
+        parts.append("code=\(nsError.code)")
+        parts.append("description=\(nsError.localizedDescription)")
+        if !nsError.userInfo.isEmpty {
+            parts.append("userInfoKeys=\(nsError.userInfo.keys.sorted().joined(separator: ","))")
+        }
+    } else {
+        parts.append("error=<none>")
+    }
+    return parts.joined(separator: " ")
+}
+
+/// Throws when a committed command buffer did not complete cleanly. Every
+/// wait in the runtime goes through this, so a GPU failure surfaces as an
+/// error on the request instead of a silently wrong token.
+func checkCommandBufferError(_ commandBuffer: MTLCommandBuffer) throws {
+    guard let detail = metalCommandBufferFailureDetail(label: commandBuffer.label,
+                                                       status: commandBuffer.status,
+                                                       error: commandBuffer.error) else {
+        return
+    }
+    throw MetalError.commandBufferFailed(detail)
 }
 
 public struct MetalFunctionConstant: Hashable, Sendable {

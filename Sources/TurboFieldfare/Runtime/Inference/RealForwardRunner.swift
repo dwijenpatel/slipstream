@@ -916,15 +916,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let encodeAndCommitNanos: UInt64
         }
         var pendingRouted: PendingRouted?
-        func finishPendingRouted(_ pending: PendingRouted, waitIfNeeded: Bool) {
+        func finishPendingRouted(_ pending: PendingRouted, waitIfNeeded: Bool) throws {
             if waitIfNeeded {
-                waitForCompletion(pending.sharedCB)
-                waitForCompletion(pending.cb)
-            } else if let err = pending.cb.error {
-                print("CB error: \(err)")
-            }
-            if let err = pending.sharedCB.error {
-                print("CB error: \(err)")
+                try waitForCompletion(pending.sharedCB)
+                try waitForCompletion(pending.cb)
+            } else {
+                try checkReportedError(pending.cb)
+                try checkReportedError(pending.sharedCB)
             }
             totalCb2Nanos &+= pending.encodeAndCommitNanos
             totalCb2GpuNanos &+= Self.gpuNanos(pending.cb)
@@ -974,15 +972,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 forceQMM: true)
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForCompletion(cb)
+            try waitForCompletion(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             totalCb1WaitWallNanos &+= waitNanos
             specFwdWaitWallNanos &+= waitNanos
             specFwdCb1GpuNanos &+= Self.gpuNanos(cb)
             specFwdLayerWaits &+= 1
-            if let error = cb.error { throw error }
             if let pending = pendingRouted {
-                finishPendingRouted(pending, waitIfNeeded: false)
+                try finishPendingRouted(pending, waitIfNeeded: false)
                 pendingRouted = nil
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
@@ -1140,9 +1137,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     // The next group's fetch may evict this group's slots;
                     // its GPU reads must land first.
                     routedCB.commit()
-                    waitForCompletion(routedCB)
-                    if let error = routedCB.error { throw error }
-                    totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
+                    try waitForCompletion(routedCB)
+                            totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
                     totalCb2GpuNanos &+= Self.gpuNanos(routedCB)
                     continue
                 }
@@ -1165,7 +1161,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
         if let pending = pendingRouted {
-            finishPendingRouted(pending, waitIfNeeded: true)
+            try finishPendingRouted(pending, waitIfNeeded: true)
             pendingRouted = nil
         }
 
@@ -1234,8 +1230,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     seed: 0)
             }
             headCB.commit()
-            waitForCompletion(headCB)
-            if let error = headCB.error { throw error }
+            try waitForCompletion(headCB)
             totalHeadGpuNanos &+= Self.gpuNanos(headCB)
             specFwdHeadGpuNanos &+= Self.gpuNanos(headCB)
             let headWall = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
@@ -1248,8 +1243,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             lastGreedyToken = result[t - 1]
         } else if let carried = carryCB {
             carried.commit()
-            waitForCompletion(carried)
-            if let error = carried.error { throw error }
+            try waitForCompletion(carried)
             carryCB = nil
         }
 
@@ -1901,10 +1895,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 startPosition: startPosition)
 
                     cb.commit()
-                    waitForCompletion(cb)
-                    if let error = cb.error {
-                        throw error
-                    }
+                    try waitForCompletion(cb)
 
                     let routeCount = t * cfg.topKExperts
                     let idPtr = scratch.routeIDs.contents()
@@ -2003,10 +1994,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         }
                     }
                     sharedCB.commit()
-                    waitForCompletion(sharedCB)
-                    if let error = sharedCB.error {
-                        throw error
-                    }
+                    try waitForCompletion(sharedCB)
 
                     let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                         device: ctx.device,
@@ -2023,11 +2011,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     func drainOldestPendingTile() throws {
                         guard !pendingTiles.isEmpty else { return }
                         let pending = pendingTiles.removeFirst()
-                        withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
-                            waitForCompletion(pending.commandBuffer)
-                        }
-                        if let error = pending.commandBuffer.error {
-                            throw error
+                        try withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
+                            try waitForCompletion(pending.commandBuffer)
                         }
                         if !pending.fetch.plannedMissSlots.isEmpty {
                             try tileLifetime.complete(tileIndex: pending.tileIndex)
@@ -2191,11 +2176,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        count: t * D)
                     }
                     tailCB.commit()
-                    withExtendedLifetime(metadata) {
-                        waitForCompletion(tailCB)
-                    }
-                    if let error = tailCB.error {
-                        throw error
+                    try withExtendedLifetime(metadata) {
+                        try waitForCompletion(tailCB)
                     }
                     if L + 1 < cfg.numLayers {
                         guard let nextCB = ctx.queue.makeCommandBuffer() else {
@@ -2239,8 +2221,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     rmsEps: eps)
             }
             specCB.commit()
-            waitForCompletion(specCB)
-            if let error = specCB.error { throw error }
+            try waitForCompletion(specCB)
             let ptr = specTokensBuf!.contents().bindMemory(to: UInt32.self,
                                                            capacity: t)
             lastSpecTokens = (0..<t).map { ptr[$0] }
@@ -2287,10 +2268,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  rmsEps: eps)
             }
             finalCB.commit()
-            waitForCompletion(finalCB)
-            if let error = finalCB.error {
-                throw error
-            }
+            try waitForCompletion(finalCB)
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             }
@@ -2330,29 +2308,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var carryCB: MTLCommandBuffer?
 
         func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
-                                        waitIfNeeded: Bool) {
+                                        waitIfNeeded: Bool) throws {
             if waitIfNeeded {
-                func wait(_ cb: MTLCommandBuffer) {
-                    waitForCompletion(cb)
-                }
                 if let sharedCB = pending.sharedCB {
-                    wait(sharedCB)
+                    try waitForCompletion(sharedCB)
                 }
                 if let phase1HitCB = pending.phase1HitCB {
-                    wait(phase1HitCB)
+                    try waitForCompletion(phase1HitCB)
                 }
-                wait(pending.cb)
-            } else if let err = pending.cb.error {
-                print("CB error: \(err)")
-            }
-            if let sharedCB = pending.sharedCB {
-                if let err = sharedCB.error {
-                    print("CB error: \(err)")
+                try waitForCompletion(pending.cb)
+            } else {
+                try checkReportedError(pending.cb)
+                if let sharedCB = pending.sharedCB {
+                    try checkReportedError(sharedCB)
                 }
-            }
-            if let phase1HitCB = pending.phase1HitCB,
-               let err = phase1HitCB.error {
-                print("CB error: \(err)")
+                if let phase1HitCB = pending.phase1HitCB {
+                    try checkReportedError(phase1HitCB)
+                }
             }
             totalCb2Nanos &+= pending.encodeAndCommitNanos
             totalCb2GpuNanos &+= Self.gpuNanos(pending.cb)
@@ -2372,7 +2344,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Embed lookup + sqrt(H) fused.
         let emb = model.embedding
         do {
-            runSync { cb in
+            try runSync { cb in
                 embedInt4.encode(commandBuffer: cb,
                                  table:  emb.buffer, tableOffset:  Int(emb.offset),
                                  scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
@@ -2596,15 +2568,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForCompletion(cb)
+            try waitForCompletion(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             totalCb1WaitWallNanos &+= waitNanos
             if let pending = pendingRoutedCommand {
-                finishPendingRoutedCommand(pending, waitIfNeeded: false)
+                try finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-            accountCb1((cb, cb1AttnCB, isLinear))
+            try accountCb1((cb, cb1AttnCB, isLinear))
 
             // CPU readback to fetch routed-expert blobs from disk.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
@@ -2892,7 +2864,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             continue
         }
         if let pending = pendingRoutedCommand {
-            finishPendingRoutedCommand(pending, waitIfNeeded: true)
+            try finishPendingRoutedCommand(pending, waitIfNeeded: true)
             pendingRoutedCommand = nil
         }
 
@@ -2928,11 +2900,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                totalHeadGpuNanos &+= runSyncTimed(gFusionHead, reusing: &carryCB)
+                totalHeadGpuNanos &+= try runSyncTimed(gFusionHead, reusing: &carryCB)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                totalHeadGpuNanos &+= runSyncTimed({ cb in
+                totalHeadGpuNanos &+= try runSyncTimed({ cb in
                     gFinalNorm(cb)
                     gLmHead(cb)
                 }, reusing: &carryCB)
@@ -2941,7 +2913,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else if let cb = carryCB {
             // No head this step: the carried routed work must still run.
             cb.commit()
-            waitForCompletion(cb)
+            try waitForCompletion(cb)
             carryCB = nil
         }
 
@@ -3111,15 +3083,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     x: attnOut, y: oOut, m: D, n: qDim)
     }
 
-    private func runSync(_ body: (MTLCommandBuffer) -> Void) {
-        _ = runSyncTimed(body)
+    private func runSync(_ body: (MTLCommandBuffer) -> Void) throws {
+        _ = try runSyncTimed(body)
     }
 
     /// runSync that returns the buffer's GPU execution nanos.
     @discardableResult
-    private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void) -> UInt64 {
+    private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void) throws -> UInt64 {
         var none: MTLCommandBuffer?
-        return runSyncTimed(body, reusing: &none)
+        return try runSyncTimed(body, reusing: &none)
     }
 
     /// When `carry` holds an uncommitted buffer (merged-cb decode path),
@@ -3127,15 +3099,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// carried work and the body. gpuNanos then includes the carried work;
     /// the head bucket is documented as coarse in merge mode.
     private func runSyncTimed(_ body: (MTLCommandBuffer) -> Void,
-                              reusing carry: inout MTLCommandBuffer?) -> UInt64 {
+                              reusing carry: inout MTLCommandBuffer?) throws -> UInt64 {
         let cb = carry ?? ctx.queue.makeCommandBuffer()!
         carry = nil
         body(cb)
         cb.commit()
         cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
-        }
+        try checkCommandBufferError(cb)
         return Self.gpuNanos(cb)
     }
 
@@ -3213,8 +3183,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return (r.position, seed)
     }
 
-    private func accountCb1(_ d: (cb: MTLCommandBuffer, attnCB: MTLCommandBuffer?, isLinear: Bool)) {
-        waitForCompletion(d.cb)
+    private func accountCb1(_ d: (cb: MTLCommandBuffer, attnCB: MTLCommandBuffer?, isLinear: Bool)) throws {
+        try waitForCompletion(d.cb)
         totalCb1GpuNanos &+= Self.gpuNanos(d.cb)
         if let attnCB = d.attnCB {
             totalCb1GpuNanos &+= Self.gpuNanos(attnCB)
@@ -3227,11 +3197,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {
+    /// Waits, then throws if the buffer did not complete cleanly. A GPU
+    /// failure (a watchdog kill during a long prefill, for one) used to be
+    /// printed and ignored, which produced a wrong answer instead of an error.
+    private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) throws {
         cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
-        }
+        try checkCommandBufferError(cb)
+    }
+
+    /// For a buffer that may still be in flight: throws only if the driver
+    /// has already attached an error to it.
+    private nonisolated func checkReportedError(_ cb: MTLCommandBuffer) throws {
+        guard let error = cb.error else { return }
+        throw MetalError.commandBufferFailed(
+            metalCommandBufferFailureDetail(label: cb.label, status: cb.status, error: error)
+                ?? "label=\(cb.label ?? "<none>") error=\(error)")
     }
 
 }
