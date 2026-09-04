@@ -52,10 +52,56 @@ public struct KVSnapshotFile {
             data.append(Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: s.ptr),
                              count: s.bytes, deallocator: .none))
         }
-        do {
-            try data.write(to: url, options: .atomic)
-        } catch {
-            throw KVSnapshotError.ioFailed("write \(url.path): \(error)")
+        try writeDurably(data, to: url)
+    }
+
+    /// Writes through a temporary file in the same directory, fsyncs it,
+    /// renames it over the destination, then fsyncs the directory so the
+    /// rename itself is on disk. `Data.write(options: .atomic)` renames but
+    /// never syncs, so a power loss after it returned could leave either no
+    /// file or an empty one. A snapshot is the one artifact that outlives
+    /// the process, so it pays for the two syncs.
+    private static func writeDurably(_ data: Data, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        let temporary = directory.appendingPathComponent(
+            ".\(url.lastPathComponent).tmp-\(getpid())")
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o644)
+        guard fd >= 0 else {
+            throw KVSnapshotError.ioFailed("open \(temporary.path): \(String(cString: strerror(errno)))")
+        }
+        func fail(_ what: String) -> KVSnapshotError {
+            let message = String(cString: strerror(errno))
+            close(fd)
+            unlink(temporary.path)
+            return KVSnapshotError.ioFailed("\(what) \(temporary.path): \(message)")
+        }
+        var written = 0
+        let total = data.count
+        while written < total {
+            let n = data.withUnsafeBytes { raw -> Int in
+                Foundation.write(fd, raw.baseAddress! + written, total - written)
+            }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw fail("write")
+            }
+            written += n
+        }
+        guard fsync(fd) == 0 else { throw fail("fsync") }
+        guard close(fd) == 0 else {
+            let message = String(cString: strerror(errno))
+            unlink(temporary.path)
+            throw KVSnapshotError.ioFailed("close \(temporary.path): \(message)")
+        }
+        guard rename(temporary.path, url.path) == 0 else {
+            let message = String(cString: strerror(errno))
+            unlink(temporary.path)
+            throw KVSnapshotError.ioFailed("rename to \(url.path): \(message)")
+        }
+        let dirFD = open(directory.path, O_RDONLY | O_CLOEXEC)
+        if dirFD >= 0 {
+            _ = fsync(dirFD)
+            close(dirFD)
         }
     }
 
