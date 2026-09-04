@@ -45,6 +45,16 @@ final class MoE {
     private let phase1U16SpecializedPSO: MTLComputePipelineState
     private let phase1SubsetU16PSO: MTLComputePipelineState
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
+    private let phase1StagedPSO: MTLComputePipelineState
+    private let phase1StagedSpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetStagedPSO: MTLComputePipelineState
+    private let phase1SubsetStagedSpecializedPSO: MTLComputePipelineState
+
+    /// Phase one with the activation staged in threadgroup memory and 16 rows
+    /// per threadgroup. Bit-identical to the unstaged kernel; off until the
+    /// A/B says it pays on this host.
+    var stageActivation = false
+    static let stagedActivationMaxD: UInt32 = 4096
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
@@ -100,6 +110,14 @@ final class MoE {
         self.phase1SubsetU16SpecializedPSO = try context.pipeline(
             "moe_phase1_gate_up_act_subset_u16load",
             constants: moeConstants)
+        self.phase1StagedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_tg_u16load", constants: activationConstants)
+        self.phase1StagedSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_tg_u16load", constants: moeConstants)
+        self.phase1SubsetStagedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_tg_u16load", constants: activationConstants)
+        self.phase1SubsetStagedSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_tg_u16load", constants: moeConstants)
         self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k8",
@@ -222,11 +240,13 @@ final class MoE {
         var dimension = d
         var intermediate = f
         var expertCount = topK
+        let staged = stageActivation && d <= Self.stagedActivationMaxD
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        let specialized = useRealDecodeConstants(d: d, f: f)
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
-                ? phase1U16SpecializedPSO
-                : phase1U16PSO)
+            staged
+                ? (specialized ? phase1StagedSpecializedPSO : phase1StagedPSO)
+                : (specialized ? phase1U16SpecializedPSO : phase1U16PSO))
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
@@ -236,9 +256,10 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        let rowsPerGroup = staged ? 16 : 8
         encoder.dispatchThreadgroups(
-            MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: (Int(topK * f) + rowsPerGroup - 1) / rowsPerGroup, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: rowsPerGroup * 32, height: 1, depth: 1))
         encoder.endEncoding()
     }
 
@@ -263,11 +284,13 @@ final class MoE {
         var intermediate = f
         var expertCount = topK
         var active = activeCount
+        let staged = stageActivation && d <= Self.stagedActivationMaxD
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        let specialized = useRealDecodeConstants(d: d, f: f)
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
-                ? phase1SubsetU16SpecializedPSO
-                : phase1SubsetU16PSO)
+            staged
+                ? (specialized ? phase1SubsetStagedSpecializedPSO : phase1SubsetStagedPSO)
+                : (specialized ? phase1SubsetU16SpecializedPSO : phase1SubsetU16PSO))
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for slot in activeSlotIndices {
             encoder.useResource(routedBlobs[Int(slot)], usage: .read)
@@ -281,9 +304,10 @@ final class MoE {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBuffer(activeSlots, offset: 0, index: 7)
         encoder.setBytes(&active, length: MemoryLayout<UInt32>.stride, index: 8)
+        let rowsPerGroup = staged ? 16 : 8
         encoder.dispatchThreadgroups(
-            MTLSize(width: (Int(activeCount * f) + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: (Int(activeCount * f) + rowsPerGroup - 1) / rowsPerGroup, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: rowsPerGroup * 32, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

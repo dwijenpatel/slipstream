@@ -158,6 +158,87 @@ import TurboFieldfareValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    /// Phase one can stage the shared activation in threadgroup memory and
+    /// run 16 rows per threadgroup instead of 8. The per-row arithmetic and
+    /// its operand order are unchanged, so the activations must match the
+    /// unstaged kernel bit for bit, on the full dispatch and on the subset
+    /// dispatch alike.
+    @Test func stagedPhaseOneIsByteIdenticalToTheUnstagedKernel() throws {
+        var rng = SeedTree(0x2D4).key("staged-phase1")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in (0..<columns).map { _ in rng.uniform(-0.4, 0.4) } }
+        }
+        var blobs = [RoutedBlob]()
+        for _ in 0..<Self.topK {
+            blobs.append(Self.makeBlob(
+                gate: matrix(rows: Self.intermediate, columns: Self.dimension),
+                up: matrix(rows: Self.intermediate, columns: Self.dimension),
+                down: matrix(rows: Self.dimension, columns: Self.intermediate)))
+        }
+        let x = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+
+        let context = try MetalContext()
+        let kernel = try MoE(context: context)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes, length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        guard routedBuffers.count == Self.topK,
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let lowSlots = context.device.makeBuffer(
+                bytes: [UInt32](0...3), length: 4 * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared),
+              let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+                routedBlobs: routedBuffers, topK: UInt32(Self.topK)) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+
+        func actsBits(staged: Bool, subset: Bool) throws -> [UInt16] {
+            kernel.stageActivation = staged
+            guard let acts = Fp16Buffer.make(context.device,
+                                             count: Self.topK * Self.intermediate) else {
+                Issue.record("alloc failed"); return []
+            }
+            let cb = context.queue.makeCommandBuffer()!
+            if subset {
+                kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+                    commandBuffer: cb, routedArgBuffer: argumentBuffer,
+                    routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+                    x: xBuffer, acts: acts, activeSlots: lowSlots,
+                    activeSlotIndices: [UInt32](0...3), activeCount: 4,
+                    d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+                    topK: UInt32(Self.topK))
+            } else {
+                kernel.encodeRoutedPersistentPhase1U16Load(
+                    commandBuffer: cb, routedArgBuffer: argumentBuffer,
+                    routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+                    x: xBuffer, acts: acts,
+                    d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+                    topK: UInt32(Self.topK))
+            }
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+            let count = Self.topK * Self.intermediate
+            return Array(UnsafeBufferPointer(
+                start: acts.contents().bindMemory(to: UInt16.self, capacity: count),
+                count: count))
+        }
+
+        let unstagedFull = try actsBits(staged: false, subset: false)
+        let stagedFull = try actsBits(staged: true, subset: false)
+        #expect(stagedFull == unstagedFull)
+        #expect(stagedFull.contains { $0 != 0 })
+        let unstagedSubset = try actsBits(staged: false, subset: true)
+        let stagedSubset = try actsBits(staged: true, subset: true)
+        #expect(stagedSubset == unstagedSubset)
+        // The subset dispatch wrote only slots 0 to 3; the unstaged full run
+        // agrees with it there.
+        #expect(Array(stagedSubset[0..<(4 * Self.intermediate)])
+                == Array(unstagedFull[0..<(4 * Self.intermediate)]))
+    }
+
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
                                  down: [[Float]]) -> RoutedBlob {

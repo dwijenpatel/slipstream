@@ -320,6 +320,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// fails with a named cause instead of a jetsam kill. Built by default
     /// from the device's working-set limit; set to nil to disable.
     public var memoryGuard: PrefillMemoryGuard?
+    /// Experiment switch: stage the routed-expert activation in threadgroup
+    /// memory (see MoE.stageActivation). Bit-identical output either way.
+    public var stageMoEActivation: Bool {
+        get { moe.stageActivation }
+        set { moe.stageActivation = newValue }
+    }
 
     /// Per-instance head and RDADVISE modes. The fused head (default) skips the
     /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
