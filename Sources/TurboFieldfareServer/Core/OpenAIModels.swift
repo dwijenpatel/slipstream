@@ -134,6 +134,29 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// Bounds what a rejection quotes back. The body cap is large, so a caller
+/// must not be able to have an arbitrary slice of its own request echoed
+/// back; `String(reflecting:)` also escapes a value that embeds a quote.
+private func boundedQuoted(_ text: String, maxLength: Int) -> String {
+    String(reflecting: bounded(text, maxLength: maxLength))
+}
+
+/// The bound is in UTF-8 bytes, never Characters: one Character can carry
+/// megabytes of combining marks. Cutting between scalars may split a
+/// grapheme, which is harmless in a diagnostic.
+private func bounded(_ text: String, maxLength: Int) -> String {
+    var bytes = 0
+    var head = String.UnicodeScalarView()
+    for scalar in text.unicodeScalars {
+        bytes += scalar.utf8.count
+        if bytes > maxLength {
+            return String(head) + "..."
+        }
+        head.append(scalar)
+    }
+    return text
+}
+
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let model: String
     public let messages: [OpenAIChatMessage]
@@ -154,6 +177,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let logprobs: Bool?
     public let presencePenalty: Float?
     public let frequencyPenalty: Float?
+    /// Kept as raw JSON. Only `type` is ever read; a value of any other shape
+    /// must reach the validator as a request error, not as malformed JSON.
+    public let responseFormat: JSONValue?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -167,6 +193,113 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case repetitionPenalty = "repetition_penalty"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
+        case responseFormat = "response_format"
+    }
+
+    /// Top-level keys accepted and ignored: caller-side bookkeeping that
+    /// cannot change what the model generates. Every other undeclared key is
+    /// a 400, so a misspelled option cannot silently generate under settings
+    /// the caller did not ask for.
+    static let toleratedKeys: Set<String> = [
+        "user", "store", "metadata", "service_tier", "prompt_cache_key",
+        "safety_identifier",
+    ]
+
+    /// Real OpenAI parameters this server cannot honor. Refused as
+    /// unsupported rather than unknown, so a caller sending a parameter that
+    /// exists is not told it looks like a typo.
+    static let unsupportedKeys: Set<String> = [
+        "logit_bias", "top_logprobs", "reasoning_effort", "verbosity",
+        "modalities", "audio", "prediction", "web_search_options",
+        "functions", "function_call",
+    ]
+
+    static let unsupportedKeyMessages: [String: String] = [
+        "functions": "legacy functions are not supported; use tools",
+        "function_call": "legacy function_call is not supported; use tools and tool_choice",
+    ]
+
+    /// Reads the object's keys as written, which the `CodingKeys` container
+    /// cannot: it reports only the keys it declares.
+    private struct AnyKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    private static let maximumNamedKeyLength = 64
+    private static let maximumNamedKeys = 8
+
+    private static func renderedKeyNames(_ names: [String]) -> String {
+        let shown = names.prefix(maximumNamedKeys).map {
+            boundedQuoted($0, maxLength: maximumNamedKeyLength)
+        }
+        let listed = shown.joined(separator: ", ")
+        let remaining = names.count - shown.count
+        return remaining > 0 ? "\(listed), and \(remaining) more" : listed
+    }
+
+}
+
+extension OpenAIChatRequest {
+    public init(from decoder: any Decoder) throws {
+        // The key sweep runs before any typed decode, so a misspelled key is
+        // named as itself rather than answered with whatever DecodingError
+        // another field happens to raise first.
+        let anyKeys = try decoder.container(keyedBy: AnyKey.self)
+        // A key set to null asks for nothing: openai-python sends an unset
+        // option as an explicit null.
+        let written = try anyKeys.allKeys
+            .filter { try !anyKeys.decodeNil(forKey: $0) }
+            .map(\.stringValue)
+        if let unsupported = written.filter(Self.unsupportedKeys.contains).sorted().first {
+            throw ServerRequestError.invalid(
+                message: Self.unsupportedKeyMessages[unsupported]
+                    ?? "\(unsupported) is not supported",
+                param: unsupported,
+                code: "unsupported_value")
+        }
+        let unknown = written
+            .filter { CodingKeys(stringValue: $0) == nil && !Self.toleratedKeys.contains($0) }
+            .sorted()
+        if let first = unknown.first {
+            throw ServerRequestError.invalid(
+                message: "unrecognized request field\(unknown.count == 1 ? "" : "s") "
+                    + Self.renderedKeyNames(unknown),
+                param: bounded(first, maxLength: Self.maximumNamedKeyLength),
+                code: "unknown_parameter")
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        model = try container.decode(String.self, forKey: .model)
+        messages = try container.decode([OpenAIChatMessage].self, forKey: .messages)
+        stream = try container.decodeIfPresent(Bool.self, forKey: .stream)
+        streamOptions = try container.decodeIfPresent(
+            OpenAIStreamOptions.self, forKey: .streamOptions)
+        temperature = try container.decodeIfPresent(Float.self, forKey: .temperature)
+        topP = try container.decodeIfPresent(Float.self, forKey: .topP)
+        maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
+        maxCompletionTokens = try container.decodeIfPresent(
+            Int.self, forKey: .maxCompletionTokens)
+        stop = try container.decodeIfPresent(OpenAIStop.self, forKey: .stop)
+        seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
+        tools = try container.decodeIfPresent([OpenAITool].self, forKey: .tools)
+        toolChoice = try container.decodeIfPresent(JSONValue.self, forKey: .toolChoice)
+        parallelToolCalls = try container.decodeIfPresent(
+            Bool.self, forKey: .parallelToolCalls)
+        topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+        repetitionPenalty = try container.decodeIfPresent(
+            Float.self, forKey: .repetitionPenalty)
+        n = try container.decodeIfPresent(Int.self, forKey: .n)
+        logprobs = try container.decodeIfPresent(Bool.self, forKey: .logprobs)
+        presencePenalty = try container.decodeIfPresent(
+            Float.self, forKey: .presencePenalty)
+        frequencyPenalty = try container.decodeIfPresent(
+            Float.self, forKey: .frequencyPenalty)
+        responseFormat = try container.decodeIfPresent(
+            JSONValue.self, forKey: .responseFormat)
     }
 }
 
@@ -271,6 +404,34 @@ public enum OpenAIRequestValidator {
         guard request.parallelToolCalls != false else {
             throw invalid("parallel_tool_calls=false is not supported",
                           "parallel_tool_calls", "unsupported_value")
+        }
+        switch request.responseFormat {
+        case nil:
+            break
+        case .object(let fields)?:
+            switch fields["type"] {
+            case nil, .null?:
+                throw invalid("response_format.type is required",
+                              "response_format", "invalid_value")
+            case .string(let type)?:
+                switch type {
+                case "text":
+                    break
+                case "json_object", "json_schema":
+                    throw invalid("structured output is not supported",
+                                  "response_format", "unsupported_value")
+                default:
+                    throw invalid(
+                        "response_format type \(boundedQuoted(type, maxLength: 64)) is not recognized",
+                        "response_format", "invalid_value")
+                }
+            default:
+                throw invalid("response_format.type must be a string",
+                              "response_format", "invalid_value")
+            }
+        default:
+            throw invalid(#"response_format must be an object such as {"type": "text"}"#,
+                          "response_format", "invalid_value")
         }
 
         // Defaults tuned for a coding agent, which is what this server exists

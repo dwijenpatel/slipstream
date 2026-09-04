@@ -168,7 +168,20 @@ Endpoints:
 Requests may contain system, developer, user, assistant, and tool messages.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
-`max_completion_tokens`, and function-tool fields.
+`max_completion_tokens`, `response_format` of type `text`, and function-tool
+fields.
+
+A top-level field the server does not declare is refused with a 400 whose
+`code` is `unknown_parameter` and whose `param` names the field, so a
+misspelled option such as `max_token` cannot run the request under other
+settings. Real OpenAI parameters the server cannot honor (`logit_bias`,
+`top_logprobs`, `reasoning_effort`, `verbosity`, `modalities`, `audio`,
+`prediction`, `web_search_options`, and the legacy `functions` and
+`function_call`) are refused with `unsupported_value`. Caller-side
+bookkeeping fields (`user`, `store`, `metadata`, `service_tier`,
+`prompt_cache_key`, `safety_identifier`) are accepted and ignored. A field
+set to `null` is treated as absent, which is what openai-python sends for an
+unset option.
 
 The server supports one model and one choice. It does not support the
 Responses API, legacy Completions, embeddings, image input, structured output,

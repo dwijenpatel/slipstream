@@ -211,6 +211,29 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    @Test func unknownRequestFieldIsA400ThatNamesTheField() async throws {
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"max_token":4}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        let body = String(decoding: data, as: UTF8.self)
+        #expect(body.contains("unknown_parameter"))
+        #expect(body.contains("max_token"))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingHeartbeatKeepsSlowFirstEventAlive() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",

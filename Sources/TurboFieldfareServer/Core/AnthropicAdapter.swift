@@ -204,7 +204,8 @@ public enum AnthropicAdapter {
                                  n: nil,
                                  logprobs: nil,
                                  presencePenalty: nil,
-                                 frequencyPenalty: nil)
+                                 frequencyPenalty: nil,
+                                 responseFormat: nil)
     }
 
     private static func flattenText(_ content: AnthropicMessageContent) -> String {
