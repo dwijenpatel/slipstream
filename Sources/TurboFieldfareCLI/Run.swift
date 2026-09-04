@@ -101,6 +101,9 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MOE_STAGE"] == "1" {
             runner.stageMoEActivation = true
         }
+        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_SPEC_PER_TOKEN"] == "1" {
+            runner.specUnionGather = false
+        }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PREFETCH"] == "1" {
             runner.predictRouting = true
             runner.prefetchExperts = true

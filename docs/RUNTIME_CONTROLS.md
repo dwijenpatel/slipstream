@@ -61,6 +61,7 @@ Environment variables read by the CLI:
 | `TURBO_FIELDFARE_PRED_ROUTE=1` | Records predicted-routing recall without prefetching. |
 | `TURBO_FIELDFARE_NO_CB_MERGE=1` | Disables the merged command-buffer decode path. The merge measured under 2 percent either way. |
 | `TURBO_FIELDFARE_SPEC=1` | Enables the speculative-decoding scaffold. Slower than plain decode until its kernels are built; see `docs/SPEC_DECODE.md`. |
+| `TURBO_FIELDFARE_SPEC_PER_TOKEN=1` | With `TURBO_FIELDFARE_SPEC=1`, verifies the routed experts with the per-token decode loop instead of the grouped union dispatch. The union is the default; it measured 2 to 3 percent faster at 64 slots and equal at 128, with byte-identical output. |
 | `TURBO_FIELDFARE_MOE_STAGE=1` | Runs routed-expert phase one with the activation staged in threadgroup memory and 16 rows per threadgroup. Bit-identical output. Measured 2026-09-04 on the M5 at 3k, 64 slots, two interleaved pairs: 25.6 against 25.6 tokens per second, no effect; off by default. |
 
 ## Run an experiment

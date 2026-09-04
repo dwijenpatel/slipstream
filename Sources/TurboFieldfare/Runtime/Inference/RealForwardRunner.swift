@@ -260,6 +260,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// row i's phase1/phase2 read arg buffer i, rewritten each layer after
     /// the previous layer's routed work has completed at the cb1 wait.
     private var specRoutedArgBufs: [MTLBuffer] = []
+    /// Verify the round's routed experts with one grouped dispatch set per
+    /// layer over the round's expert union, instead of the per-token decode
+    /// loop that re-reads every shared expert. Measured 2026-09-04; the
+    /// per-token loop stays for TURBO_FIELDFARE_SPEC_PER_TOKEN=1.
+    public var specUnionGather = true
+    /// Argument and metadata buffers of the union path, kept until the next
+    /// round starts: the merged command buffer may still be executing them.
+    private var specUnionKeepAlive: [MTLBuffer] = []
     /// Batched-head scratch for the M2' verify: [maxSpecTokens, vocab]
     /// logits written by one QMM (head weights read once per 8-row tile
     /// instead of once per row), then per-row GPU argmax.
@@ -869,6 +877,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   startPosition: Int,
                                   config: PrefillRuntimeConfig,
                                   emitHeads: Bool) async throws -> [UInt32] {
+        specUnionKeepAlive.removeAll(keepingCapacity: true)
         let t = tokens.count
         precondition(t > 0 && t <= Self.maxSpecTokens)
         guard !cfg.ffnSandwichNorms else {
@@ -1096,11 +1105,127 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             groups.append((groupStart..<t, groupUnion))
 
-            // Routed FFN looped per token through the decode MoE kernels
-            // (per-token expert weights re-read; gather-GEMM is the queued
-            // follow-up if measurement says it pays). phase2 folds the
-            // shared branch as its residual, so the tail adds h2 only.
             let routedOffsets = model.routedExpertOffsets(layer: L)
+            if specUnionGather, groups.count == 1 {
+                // Gather-GEMM over the round's expert union: each expert's
+                // weights are read once for every token that routes to it,
+                // through the prefill grouped-MoE kernels, then one
+                // token-major reduce. The shared branch, which the per-token
+                // path folds into phase 2 as its residual, is added once.
+                let group = groups[0]
+                let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let unionViews = try await model.fetchRoutedExperts(layer: L,
+                                                                    experts: group.union)
+                let groupIoNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+                totalIoNanos &+= groupIoNanos
+                specFwdIoNanos &+= groupIoNanos
+                specFwdUnionExperts &+= UInt64(group.union.count)
+                var viewByExpert = [Int: TensorView](minimumCapacity: group.union.count)
+                for (idx, expert) in group.union.enumerated() {
+                    viewByExpert[expert] = unionViews[idx]
+                }
+
+                let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let routeCount = t * topK
+                let weightPtr = scratch.routeWeights.contents()
+                    .bindMemory(to: Float16.self, capacity: routeCount)
+                var routeIDs = [UInt32]()
+                routeIDs.reserveCapacity(routeCount)
+                var routeWeights = [Float16]()
+                routeWeights.reserveCapacity(routeCount)
+                for i in 0..<t {
+                    for k in 0..<topK {
+                        routeIDs.append(UInt32(perToken[i][k]))
+                        routeWeights.append(weightPtr[i * topK + k])
+                    }
+                }
+                let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDs,
+                                                               weights: routeWeights,
+                                                               queryCount: t,
+                                                               topK: topK)
+                let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+                    pairs,
+                    queryCount: t,
+                    topK: topK,
+                    numExperts: cfg.numExperts,
+                    tileExpertCount: min(16, slotCap),
+                    expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+                let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
+                    device: ctx.device, routes: routes)
+                specUnionKeepAlive.append(metadata.sortedPairs)
+                guard let routedCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                for tileIndex in routes.tiles.indices {
+                    let tile = routes.tiles[tileIndex]
+                    let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tileIndex,
+                                                                             routes: routes)
+                    let views = try expertIDs.map { expert -> TensorView in
+                        guard let view = viewByExpert[expert] else {
+                            throw ModelError.indexCorrupt(
+                                detail: "spec union tile expert \(expert) was not fetched")
+                        }
+                        return view
+                    }
+                    let binding = try PrefillStreamedTileBinding(expertIDs: expertIDs, views: views)
+                    try binding.validateCoversPairs(routes.sortedPairs,
+                                                    pairStart: Int(tile.pairStart),
+                                                    pairCount: Int(tile.pairCount))
+                    let argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
+                        device: ctx.device, binding: binding)
+                    specUnionKeepAlive.append(argumentBuffer.buffer)
+                    let params = PrefillGroupedRoutedMoEStreamedParams(
+                        pairStart: tile.pairStart,
+                        pairCount: tile.pairCount,
+                        d: UInt32(D),
+                        routedIntermediate: UInt32(cfg.moeIntermediateSize),
+                        topK: UInt32(topK),
+                        hiddenStrideElements: UInt32(D),
+                        binding: binding,
+                        offsets: routedOffsets)
+                    _ = prefillGroupedMoE.encodeStreamedBatched(
+                        commandBuffer: routedCB,
+                        hidden: scratch.routedX,
+                        sortedPairs: metadata.sortedPairs,
+                        routePartials: scratch.routePartials,
+                        gateUpActScratch: scratch.routedGateUpActScratch,
+                        downScratch: scratch.routedDownScratch,
+                        argumentBuffer: argumentBuffer,
+                        binding: binding,
+                        params: params,
+                        pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+                }
+                prefillMoE.encodeReduceTokenMajor(commandBuffer: routedCB,
+                                                  routePartials: scratch.routePartials,
+                                                  routeWeights: scratch.routeWeights,
+                                                  h2: scratch.h2,
+                                                  queryCount: UInt32(t),
+                                                  topK: UInt32(topK),
+                                                  d: UInt32(D))
+                elementwise!.encodeResidualAdd(commandBuffer: routedCB,
+                                               hidden: scratch.h2,
+                                               delta: scratch.h1,
+                                               count: t * D)
+                elementwise!.encodeResidualAdd(commandBuffer: routedCB,
+                                               hidden: scratch.hidden,
+                                               delta: scratch.h2,
+                                               count: t * D)
+                if mergeCommandBuffers {
+                    carryCB = routedCB
+                    totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start
+                } else {
+                    routedCB.commit()
+                    precondition(pendingRouted == nil,
+                                 "spec routed pipeline drained before queuing the next layer")
+                    pendingRouted = PendingRouted(
+                        cb: routedCB,
+                        sharedCB: sharedCB,
+                        encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+                }
+            } else {
+            // Routed FFN looped per token through the decode MoE kernels
+            // (per-token expert weights re-read). phase2 folds the shared
+            // branch as its residual, so the tail adds h2 only.
             for (groupIndex, group) in groups.enumerated() {
                 let isLastGroup = groupIndex == groups.count - 1
                 let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -1178,6 +1303,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         sharedCB: sharedCB,
                         encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
                 }
+            }
             }
         }
         if let pending = pendingRouted {

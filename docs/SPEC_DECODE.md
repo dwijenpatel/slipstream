@@ -198,3 +198,39 @@ which halves expert traffic and removes the per-token loop, and multi-row
 variants of the fused linear-attention input projection and the shared
 expert. The drafter is the multiplier after that: a draft head raises
 acceptance from 42 to 80 or 90 percent on this model in oMLX's measurement.
+
+## M2' v2, second kernel: the union gather (2026-09-04, later)
+
+Built: the verify round's routed experts now run through the prefill
+grouped-MoE kernels over the round's expert union, one dispatch set per
+layer plus a token-major reduce, instead of the per-token decode loop. The
+shared branch, which the per-token path folded into phase two as its
+residual, is added once. Gates: deterministic across repeats, and the output
+is byte-identical to the per-token path and to sequential decode on the
+code continuation. `TURBO_FIELDFARE_SPEC_PER_TOKEN=1` restores the loop.
+
+Measured, same protocol as above, interleaved pairs:
+
+| slots | per-token | union | per-layer GPU per 512 tokens |
+| --- | --- | --- | --- |
+| 128 | 22.7 | 22.2, 22.7 | 11.5 s against 11.3 s |
+| 64 | 20.3, 19.7 | 20.6, 20.1 | 11.5 s against 11.2 s |
+
+A 2 to 3 percent gain at 64 slots and a null at 128. The routed experts were
+therefore not the round's main GPU term, whatever the byte arithmetic said:
+either the grouped kernels give back in efficiency what they save in bytes
+at two rows per expert, or the per-token loop's repeated expert reads were
+already cache hits. The projections and head are weights-once, the shared
+expert is about 8 ms per round by bytes, and attention is small at this
+context, which leaves the linear-attention recurrence as the remaining
+term: `gdn_delta_step_prefill` walks the eight rows sequentially inside one
+kernel, and the decode profile prices one step at about 6 ms per layer set.
+Eight steps would be near 50 ms of the 93 ms round. The next measurement is
+a decomposition probe that skips the recurrence, and the next kernel is the
+chunked gated-delta prefill from gpu-kernel's campaign 4, whose seed already
+beats the sequential form.
+
+Also learned: the multi-row GEMV already serves the linear-attention input
+projections, because the prefill path issues them through the same
+projection encoder with the q and kv families; a fused single dispatch would
+save launches, not bytes.
