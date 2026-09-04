@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/turbofieldfare-logo-rounded.png" alt="TurboFieldfare logo: a fieldfare inside a segmented cache ring" width="280">
+  <img src="assets/turbofieldfare-logo-rounded.png" alt="TurboFieldfare logo: a fieldfare inside a segmented cache ring" width="280">
 </p>
 
 <h1 align="center">TurboFieldfare</h1>
@@ -13,20 +13,20 @@
   <img alt="Swift 6.2" src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white">
   <img alt="Metal 4" src="https://img.shields.io/badge/Metal-4-5E5CE6">
   <img alt="macOS 26 or later" src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white">
-  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache%202.0-2ea44f"></a>
+  <a href="../LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache%202.0-2ea44f"></a>
 </p>
 
 <p align="center">
   <a href="#try-it">Quick start</a> ·
-  <a href="docs/OPENAI_SERVER.md">Local server</a> ·
-  <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
-  <a href="docs/COMMUNITY_BENCHMARKS.md">Contribute results</a> ·
-  <a href="docs/SYSTEM_DESIGN.md">How it works</a> ·
-  <a href="docs/OPTIMIZATION_JOURNEY.md">Experiments</a> ·
-  <a href="docs/IMPLEMENTATION_REFERENCES.md">References</a>
+  <a href="OPENAI_SERVER.md">Local server</a> ·
+  <a href="BENCHMARKS.md">Benchmarks</a> ·
+  <a href="COMMUNITY_BENCHMARKS.md">Contribute results</a> ·
+  <a href="SYSTEM_DESIGN.md">How it works</a> ·
+  <a href="OPTIMIZATION_JOURNEY.md">Experiments</a> ·
+  <a href="IMPLEMENTATION_REFERENCES.md">References</a>
 </p>
 
-![TurboFieldfare Mac app generating text with Gemma 4 26B-A4B](docs/assets/turbofieldfare-app.webp)
+![TurboFieldfare Mac app generating text with Gemma 4 26B-A4B](assets/turbofieldfare-app.webp)
 
 Memory got expensive. So I gave a 26-billion-parameter model a ~2 GB budget.
 
@@ -39,7 +39,7 @@ RAM.
 
 The runtime, streaming installer, CLI, and native Mac app are written in Swift
 and Metal. TurboFieldfare is model-specific rather than a wrapper around MLX or
-llama.cpp. The curated [experiment record](docs/experiments/EXPERIMENT_INVENTORY.md)
+llama.cpp. The curated [experiment record](experiments/EXPERIMENT_INVENTORY.md)
 summarizes 103 measured results across kernels, caching, I/O, prefill, and
 decode.
 
@@ -70,14 +70,14 @@ your prompt, and press **Generate**.
 | Storage         | About 14.3 GB installed for Gemma 4; about 19.6 GB for Qwen 3.6                                                          |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
 | Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
-| M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
-| M5 measured decode | [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
-| M5 measured decode, Qwen 3.6 | [18.8-23.1 tok/s](docs/BENCHMARKS.md#qwen-36-35b-a3b-measured-decode) at ~1.45 GB footprint |
+| M2 measured decode | [5.1-6.3 tok/s](BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
+| M5 measured decode | [31-35 tok/s](BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
+| M5 measured decode, Qwen 3.6 | [18.8-23.1 tok/s](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode) at ~1.45 GB footprint |
 
 The measured result is a reference point, not a performance ceiling. Prompt
 length, generated length, page-cache state, and hardware all affect throughput.
 To help measure another Apple Silicon Mac, follow the
-[community benchmark guide](docs/COMMUNITY_BENCHMARKS.md).
+[community benchmark guide](COMMUNITY_BENCHMARKS.md).
 
 ## Using TurboFieldfare
 
@@ -163,7 +163,7 @@ After installation:
 
 The status bar shows generation progress, decode speed, and memory use. Use the
 right pane to configure sampling, context length, expert-cache slots, and
-runtime options. See [Runtime controls](docs/RUNTIME_CONTROLS.md) for details
+runtime options. See [Runtime controls](RUNTIME_CONTROLS.md) for details
 and defaults.
 
 ### Command-line interface
@@ -269,7 +269,7 @@ streaming, function tools, and single-prefix prompt reuse. The client must
 authorize and run every tool call. Keep the server on loopback; it has no
 remote authentication or TLS.
 
-See [Local server](docs/OPENAI_SERVER.md) for a test request, Python and
+See [Local server](OPENAI_SERVER.md) for a test request, Python and
 OpenCode setup, prompt reuse, tool handling, and the supported API subset.
 
 ## Test and contribute
@@ -286,7 +286,7 @@ only one TurboFieldfare app, decode service, CLI, server, test, or other
 local-model process at a time.
 
 To contribute a comparable performance result, follow the
-[community benchmark guide](docs/COMMUNITY_BENCHMARKS.md).
+[community benchmark guide](COMMUNITY_BENCHMARKS.md).
 
 ## How the inference engine works
 
@@ -304,7 +304,7 @@ directly into `.gturbo` without staging a full shard or tensor.
 For a visual introduction to the model architecture, see Maarten Grootendorst's
 [A Visual Guide to Gemma 4](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-gemma-4).
 
-[System design](docs/SYSTEM_DESIGN.md) explains the `.gturbo` layout, memory
+[System design](SYSTEM_DESIGN.md) explains the `.gturbo` layout, memory
 ownership, prefill, router handoff, `cb1`/`io`/`cb2` phases, Metal kernels, and
 correctness invariants.
 
@@ -356,7 +356,7 @@ environment; the server auto-detects the installed model and serves it as
 `qwen3.6-35b-a3b` with the ChatML template and Qwen tool-call format.
 
 Measured on an M5 following the
-[community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — the three frozen
+[community benchmark protocol](COMMUNITY_BENCHMARKS.md) — the three frozen
 prompts, fixed seeds, one warmup then one measured run per case in a fresh
 process, every footer reporting `stop=endOfTurn`:
 
@@ -380,29 +380,29 @@ using about 0.7 GB less. Its install needs about 19.6 GB of disk.
 
 ## Experiments and technical documentation
 
-The [experiments that shaped TurboFieldfare](docs/OPTIMIZATION_JOURNEY.md)
+The [experiments that shaped TurboFieldfare](OPTIMIZATION_JOURNEY.md)
 explain the largest wins, the plausible ideas that failed, and the early
 results that reversed under stronger validation. The detailed
-[experiment record](docs/experiments/EXPERIMENT_INVENTORY.md) keeps all 103
+[experiment record](experiments/EXPERIMENT_INVENTORY.md) keeps all 103
 audited entries as optional evidence.
 
 Useful entry points:
 
-- [Local OpenAI-compatible server](docs/OPENAI_SERVER.md)
-- [System design](docs/SYSTEM_DESIGN.md)
-- [Benchmarks](docs/BENCHMARKS.md)
-- [The experiments that shaped TurboFieldfare](docs/OPTIMIZATION_JOURNEY.md)
-- [Experiment inventory and summaries](docs/experiments/EXPERIMENT_INVENTORY.md)
-- [Implementation references](docs/IMPLEMENTATION_REFERENCES.md)
+- [Local OpenAI-compatible server](OPENAI_SERVER.md)
+- [System design](SYSTEM_DESIGN.md)
+- [Benchmarks](BENCHMARKS.md)
+- [The experiments that shaped TurboFieldfare](OPTIMIZATION_JOURNEY.md)
+- [Experiment inventory and summaries](experiments/EXPERIMENT_INVENTORY.md)
+- [Implementation references](IMPLEMENTATION_REFERENCES.md)
 
 ## License and model terms
 
 TurboFieldfare's source and documentation are licensed under the
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](../LICENSE).
 
 Model weights are not included. The installer downloads them separately from
 the pinned Hugging Face checkpoint, and the weights remain governed by their
-source terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the model
+source terms. See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) for the model
 and Swift package license review.
 
 TurboFieldfare is an independent research project. It is not affiliated with,

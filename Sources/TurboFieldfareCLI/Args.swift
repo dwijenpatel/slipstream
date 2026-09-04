@@ -107,17 +107,19 @@ extension Args {
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
       --expert-cache-slots <n>  Routed-expert cache slots per layer, one
-                                slot per expert (default 16 of this model's
+                                slot per expert (default 64 of this model's
                                 256). Allowed: 8, 16, 24, 32, 48, 64, 96,
                                 128, 192, 256. More slots raise the hit
-                                rate and cost RAM; measured warm on M5,
-                                16 -> 128 slots is 25.3 -> 32.1 tok/s.
-      --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
-                                chunks cut routed-expert re-reads during
-                                prompt processing; auto sizes the chunk to
-                                the prompt and is worth ~3.5x on time to
-                                first token. Allowed: 32, 64, 128, 256,
-                                512, 1024, 2048, 4096.
+                                rate and cost RAM, and past ~64 they evict
+                                the OS page cache: measured on a 24 GB M5
+                                at a 3k prompt, 16 -> 64 slots is 25.1 ->
+                                27.8 tok/s and 192 slots is 17.9.
+      --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Every
+                                chunk re-reads most of the expert pool, so
+                                auto sizes the chunk to the prompt: prefill
+                                of a 2,940-token prompt went 63.3 -> 18.5 s
+                                against 128-token chunks. Allowed: 32, 64,
+                                128, 256, 512, 1024, 2048, 4096.
       --kv-snapshot <path>      Whole-state KV snapshot file: saved after a
                                 fresh prefill, restored (skipping prefill)
                                 when the file matches the exact prompt.

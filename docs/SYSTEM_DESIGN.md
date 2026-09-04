@@ -6,6 +6,13 @@ has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
 
+This document describes the runtime slipstream inherited from TurboFieldfare,
+and it is still accurate for the parts slipstream did not change. What
+slipstream changed, and the defaults that moved, are in the
+[README](../README.md#3-what-is-new-here-and-what-is-not) and in the
+[2026-09-04 review](REVIEW-2026-09-04.md). Where this document and the
+README disagree on a default, the README is current.
+
 This document covers the current `production` path. The [optimization
 journey](OPTIMIZATION_JOURNEY.md) covers the experiments, including the
 failures and changes we later reversed.
@@ -149,17 +156,17 @@ Resident and reusable app-owned resources:
 | --- | ---: | --- |
 | Common model file | 1,353,771,068 bytes | Read-only file mapping wrapped by Metal buffers. |
 | FP16 KV cache at 4K | About 305 MiB | App-owned. The 25 sliding-window layers use bounded 1,152-row rings; the 5 full-attention layers use linear storage sized for the requested context. |
-| Reusable runtime scratch | About 15.6 MiB for the production 128-token prefill arena, plus about 2 MiB of split-attention scratch and smaller decode buffers | App-owned and reused across layers or chunks. |
+| Reusable runtime scratch | About 15.6 MiB at a 128-token prefill chunk, scaling with the chunk up to 4,096 tokens, plus about 2 MiB of split-attention scratch and smaller decode buffers | App-owned and reused across layers or chunks. |
 
 Streamed expert resources:
 
 | Resource | Current size or capacity | Ownership and behavior |
 | --- | ---: | --- |
-| Routed-expert slots | 16 per opened layer; one page-rounded 3,358,720-byte blob per slot | App-owned buffers allocated with 2 MiB alignment and wrapped by Metal without another copy. Opening all 30 layer streamers reserves about 1.50 GiB of slot capacity; pages become resident as reads fill them. |
+| Routed-expert slots | 64 per opened layer by default in slipstream (16 upstream); one page-rounded blob per slot, 3,358,720 bytes on Gemma 4 and 1,769,472 on Qwen3.6 | App-owned buffers allocated with 2 MiB alignment and wrapped by Metal without another copy. At 16 slots, opening all 30 Gemma layer streamers reserves about 1.50 GiB of slot capacity; at 64 slots on Qwen3.6 the cap is 4.5 GB. Pages become resident as reads fill them. |
 | Routed-expert files | 12,897,484,800 bytes (12.01 GiB) on disk | Thirty per-layer files. Only selected blobs enter explicit slots; the files are not mapped as one resident pool. |
 | macOS unified file cache | Dynamic | OS-owned second-chance cache. It may make a `pread` cheap, but it is not a guaranteed part of the app budget. |
 
-Each opened layer has 16 expert slots, but untouched slot pages are not
+Each opened layer has the configured number of expert slots, but untouched slot pages are not
 necessarily resident. RSS and physical footprint depend on the layers and
 experts used, file-cache state, and memory pressure. Static capacity therefore
 does not predict process RSS.
@@ -190,7 +197,7 @@ flowchart LR
 
     subgraph Memory["Unified memory"]
         RB["read-only mapped\ncommon buffers"]
-        EC["per-layer LFU slots\n16 expert blobs"]
+        EC["per-layer LFU slots\n64 expert blobs by default"]
         KV["FP16 KV ring"]
         WS["reusable scratch"]
     end
@@ -249,7 +256,9 @@ and reproducible comparisons.
 
 ## Prefill
 
-The production profile handles up to 128 prompt tokens at a time. Execution
+The production profile handles up to 4,096 prompt tokens at a time, and the
+slipstream CLI sizes the chunk to cover the whole prompt (`--prefill-chunk
+auto`), because every chunk re-reads most of the expert pool. Execution
 stays layer-major: it moves each bounded group of rows through the transformer
 one layer at a time, without holding expert activations for the full prompt.
 
@@ -261,7 +270,7 @@ For each chunk and layer, TurboFieldfare:
 - groups token/expert pairs into bounded routed-MoE work;
 - streams experts in tiles of at most eight;
 - may fetch the next tile while GPU work for the current tile remains queued,
-  with both tiles fitting in the 16-slot cache;
+  with both tiles fitting in the slot cache;
 - never reuses a slot while queued GPU work still owns it; and
 - combines the resident shared branch and routed branch before the layer tail.
 
@@ -457,7 +466,7 @@ prefix by default. It retains only that prefix. See the
 
 TurboFieldfare is a research system. The Mac app exposes a small set of typed
 runtime controls. The production path uses FP16 KV, exact split-K/V
-attention, a 16-slot LFU expert cache, chunked prefill, staged affine MPP
+attention, a 64-slot LFU expert cache, chunked prefill, staged affine MPP
 prefill, and batched routed MoE prefill. File-read advice (`RDADVISE`) is off by
 default.
 
