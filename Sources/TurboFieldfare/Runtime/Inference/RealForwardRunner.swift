@@ -316,6 +316,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let sharedExpertProjections: [LayerSharedExpertProjections]
 
     public let maxContext: Int
+    /// Refuses a prefill chunk the process cannot afford, so a long prompt
+    /// fails with a named cause instead of a jetsam kill. Built by default
+    /// from the device's working-set limit; set to nil to disable.
+    public var memoryGuard: PrefillMemoryGuard?
 
     /// Per-instance head and RDADVISE modes. The fused head (default) skips the
     /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
@@ -342,6 +346,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.ctx = context
         self.cfg = model.config
         self.maxContext = maxContext
+        // The analytic floor for prefill growth is the KV the full-attention
+        // layers append per token; the guard learns the rest (expert-cache
+        // fills, scratch) from the chunks it admits.
+        let fullLayers = model.config.fullAttentionLayerMask.filter { $0 == 1 }.count
+        let kvBytesPerToken = UInt64(fullLayers * 2 * model.config.numKVHeads
+                                     * model.config.fullHeadDim * MemoryLayout<Float16>.size)
+        self.memoryGuard = PrefillMemoryGuard(budget: .forDevice(context.device),
+                                              floorBytesPerToken: kvBytesPerToken)
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.fusedHeadAvailable = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
@@ -772,6 +784,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             try Task.checkCancellation()
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            try memoryGuard?.beforeChunk(tokens: span.tokenCount)
             try await executePrefillChunk(
                 tokens: tokens[lower..<upper],
                 startPosition: span.startPosition,
@@ -780,6 +793,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 scratch: scratch,
                 config: config,
                 writeFinalHead: spanIndex == spans.count - 1)
+            memoryGuard?.afterChunk(tokens: span.tokenCount)
             onProgress(span.completedCount)
         }
         if outputMode == .perPositionGreedy

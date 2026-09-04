@@ -31,6 +31,20 @@ disable both truncation controls, pass `--top-k 0 --top-p 1`.
 | Prompt prefill | on, off | none | on | Off disables the chunked prefill path. Diagnostic only. |
 | RDADVISE | off, default, bounded, adaptive | `--rdadvise` | off | Read-ahead advice on expert files. Measured neutral or negative on this host; kept for experiments. |
 
+## Memory guard
+
+Before each prefill chunk the runtime reads the process's physical footprint,
+the number macOS compares against its limit, and refuses the chunk when the
+footprint plus a predicted growth would exceed 90 percent of the GPU's
+working-set limit. The prediction is the larger of an analytic floor (the KV
+the full-attention layers append per token) and the growth measured on the
+chunks already run, times the chunk length, with a 1.3 margin. A refusal
+fails the request with a message that names the numbers and the fix; the
+server answers it with status 503 and code `memory_budget_exceeded`. Without
+the guard the same prompt ends in a jetsam kill of the whole process. The
+guard admits when the footprint cannot be read, so a diagnostics failure
+never refuses a request.
+
 The CLI applies these settings when it loads the model. Changing context
 length, expert-cache slots, RDADVISE, or the prefill chunk requires a reload.
 Greedy and sampled generation use different output-head paths, and the server

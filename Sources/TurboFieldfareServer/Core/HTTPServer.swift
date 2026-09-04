@@ -612,6 +612,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         if let requestError = error as? ServerRequestError {
             let status: HTTPResponseStatus = requestError == .queueFull ? .tooManyRequests : .badRequest
             writeError(context, status: status, requestError.envelope)
+        } else if let budgetError = error as? MemoryBudgetError {
+            // The request was refused before a prefill chunk that would have
+            // pushed the process over its memory cap. Named, and retryable
+            // with a smaller prompt or a smaller cache.
+            writeError(context, status: .serviceUnavailable,
+                       OpenAIErrorEnvelope(message: String(describing: budgetError),
+                                           code: "memory_budget_exceeded"))
         } else {
             writeError(context, status: .internalServerError,
                        OpenAIErrorEnvelope(message: "generation failed",

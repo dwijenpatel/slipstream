@@ -183,6 +183,10 @@ bookkeeping fields (`user`, `store`, `metadata`, `service_tier`,
 set to `null` is treated as absent, which is what openai-python sends for an
 unset option.
 
+A request refused by the memory guard returns status 503 with code
+`memory_budget_exceeded` and a message naming the footprint, the predicted
+growth, and the cap. See the memory guard section of `RUNTIME_CONTROLS.md`.
+
 The server supports one model and one choice. It does not support the
 Responses API, legacy Completions, embeddings, image input, structured output,
 batching, log probabilities, or model switching.
