@@ -1226,18 +1226,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    t: UInt32(t),
                                    d: UInt32(D),
                                    eps: eps)
-            prefillQMM.encode(commandBuffer: headCB,
-                              weights: lm.buffer,
-                              weightsOffset: Int(lm.offset),
-                              scales: lm.buffer,
-                              scalesOffset: Int(lm.scaleOffset),
-                              biases: lm.buffer,
-                              biasesOffset: Int(lm.biasOffset),
-                              x: scratch.normed,
-                              y: logitsT,
-                              t: t,
-                              n: vocab,
-                              k: D)
+            if t <= DequantInt4GEMV.maxMultiRows {
+                // Head weights read once for all t rows: ~0.25 GB per round
+                // instead of ~t times that through the tiled QMM.
+                int4.encodeMultiRow(commandBuffer: headCB,
+                                    weights: lm.buffer,
+                                    weightsOffset: Int(lm.offset),
+                                    scales: lm.buffer,
+                                    scalesOffset: Int(lm.scaleOffset),
+                                    biases: lm.buffer,
+                                    biasesOffset: Int(lm.biasOffset),
+                                    x: scratch.normed,
+                                    xStrideElements: D,
+                                    y: logitsT,
+                                    yStrideElements: vocab,
+                                    rows: t,
+                                    m: UInt32(vocab),
+                                    n: UInt32(D))
+            } else {
+                prefillQMM.encode(commandBuffer: headCB,
+                                  weights: lm.buffer,
+                                  weightsOffset: Int(lm.offset),
+                                  scales: lm.buffer,
+                                  scalesOffset: Int(lm.scaleOffset),
+                                  biases: lm.buffer,
+                                  biasesOffset: Int(lm.biasOffset),
+                                  x: scratch.normed,
+                                  y: logitsT,
+                                  t: t,
+                                  n: vocab,
+                                  k: D)
+            }
             for row in 0..<t {
                 argmax.encode(
                     commandBuffer: headCB,
@@ -1380,6 +1399,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if path == .affineThreadgroupF16 {
                 return
             }
+        }
+        // Below the QMM crossover every batched matmul here costs about t
+        // GEMVs (measured 2026-08-05, SPEC_DECODE.md). The multi-row GEMV
+        // reads each weight once for up to 8 activation rows, so it is the
+        // right kernel for the speculative verify sizes and for short
+        // prefill spans alike.
+        if tokenCount >= 2, tokenCount < 32,
+           family == .q || family == .kv || family == .o {
+            int4.encodeMultiRow(commandBuffer: commandBuffer,
+                                weights: weights.buffer,
+                                weightsOffset: Int(weights.offset),
+                                scales: weights.buffer,
+                                scalesOffset: Int(weights.scaleOffset),
+                                biases: weights.buffer,
+                                biasesOffset: Int(weights.biasOffset),
+                                x: x,
+                                xStrideElements: xStrideElements,
+                                y: y,
+                                yStrideElements: yStrideElements,
+                                rows: tokenCount,
+                                m: UInt32(rows),
+                                n: UInt32(columns))
+            return
         }
         if forceQMM
             || PrefillProjectionDispatchPolicy.selectedDispatch(for: family,

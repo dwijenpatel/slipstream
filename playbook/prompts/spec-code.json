@@ -1,0 +1,6 @@
+[
+ {
+  "role": "user",
+  "content": "Write a Python module named `records.py`. It must define a class `Record` with exactly 30 methods named get_field_1 through get_field_30. Each method has a one-line docstring 'Return field N.' and returns self._fields['field_N']. After the class, define a function `all_getters(record)` that returns a list of the 30 values in order. No commentary; code only."
+ }
+]

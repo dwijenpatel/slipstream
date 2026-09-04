@@ -253,13 +253,17 @@ here read the weights once per row below 32 rows, so verifying nine tokens
 costs about nine GEMVs. Expert traffic also scales with verified tokens, not
 emitted ones, although the eight experts each drafted token routes to overlap
 55 percent within a round. A multi-row int4 kernel that reads weights once
-crosses break-even by itself in the recorded pricing; it is not built.
+now serves the projections and the head; on a code continuation at 128 slots
+it took speculative decode from 16.9 to 22.3 tokens per second against 28.6
+sequential, with byte-identical output.[^17] The routed experts and the
+linear-attention projection still run per token, and they are the rest of
+the round.
 
 ## 5. Where prefill time goes
 
 Until 2026-09-04 the time to first token grew faster than the prompt. Timing
 each 4096-token chunk of the 11,738-token prompt gave 26.3, 42.8, and 53.3
-seconds for chunks that see 4,096, 8,192, and 11,736 keys.[^17] A fit put the
+seconds for chunks that see 4,096, 8,192, and 11,736 keys.[^18] A fit put the
 cost at 4.4 ms per token plus about 1 microsecond per token-key pair. The
 second term was attention: 55 percent of the 12k prefill and about 73 percent
 of the 24k one. The cause was a kernel-selection gap. Qwen's full-attention
@@ -284,7 +288,7 @@ The same probe, same prompt, same machine, after the port:
 The per-token cost no longer grows with position. At 24k the six chunks took
 between 16 and 19 seconds each, 108.9 seconds in all against 381.7 before.
 The harness then measured time to first token at the two cache sizes that
-matter, in the same round-robin protocol as section 2:[^18]
+matter, in the same round-robin protocol as section 2:[^19]
 
 | slots | 3k before | 3k after | 12k before | 12k after | 24k before | 24k after |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -297,7 +301,7 @@ sweep ran overnight on an idle one. Its decode rates read about 30 percent
 below August at every cell, and a same-session interleaved A/B put the
 pre-port binary at the same depressed rate, 20.3 and 18.5 tokens per second
 against the new binary's 20.0 and 20.0, so the drop is the machine and not
-the change; those decode figures are not quoted.[^19] The pre-port binary also
+the change; those decode figures are not quoted.[^20] The pre-port binary also
 prefilled the 3k prompt in 18.4 and 19.0 seconds that day against 17.4 in
 August, so the "after" times carry a few percent of the same load and are
 pessimistic. Section 2's tables remain the August measurement until a full
@@ -329,7 +333,7 @@ Take mlx-lm, or LM Studio's MLX engine over it, for speed paid for in memory:
 or a second program. oMLX's own single-stream additions are large on other
 machines, 85 to 140 tokens per second on this model on an M3 Ultra by its
 authors' measurement, but no number exists for it on an M5, and several of
-its Qwen fast paths are disabled there.[^20] Take llama.cpp, or Ollama over
+its Qwen fast paths are disabled there.[^21] Take llama.cpp, or Ollama over
 it, for the widest model and quantization choice, and note its two
 configurations: resident by default at 16 GB, or expert tensors paged from
 the SSD once both `--n-cpu-moe` and `--no-mmap` are set, at which point the
@@ -493,27 +497,33 @@ This page describes commit `1c99256` and measurements taken between
     verify 178 ms per round. The kernel pricing that follows is recorded in
     the same document and in the companion repository's log of 2026-08-06.
 
-[^17]: Measured 2026-09-04 with a build of commit `01f7d5e` that prints a
+[^17]: `docs/SPEC_DECODE.md`, section "M2' v2, first kernel", 2026-09-04:
+    raw code continuation, 512 tokens, greedy, page cache leveled, 128
+    slots; acceptance 41.6 percent, 3.91 emitted per round, verify 137 ms
+    per round, down from 178. At 64 slots the round's union of experts
+    thrashes the cache and the speculative rate is 17.0.
+
+[^18]: Measured 2026-09-04 with a build of commit `01f7d5e` that prints a
     timestamp at each prefill chunk boundary, on the same 11,738-token prompt
     file the tables use, in a fresh process with no other model process
     running. The fit predicts the third chunk at 50.4 seconds against 53.3
     measured. Attention FLOPs at 12k are 11.3 TFLOP, which over the fitted
     67.8 seconds is 0.17 TFLOPS against the tensor unit's measured 15.4.
 
-[^18]: `playbook/fill_table.sh --only 'slipstream, (16|64) of' --contexts
+[^19]: `playbook/fill_table.sh --only 'slipstream, (16|64) of' --contexts
     3k,12k,24k` at commit `1c99256`, 2026-09-04 14:07 to 14:26, results in
     `bench-results/table-20260904-140715/results.csv`. Two round-robin
     passes, the second recorded; drift control 18.508 against 18.152
     tokens per second at 3k, 2.0 percent. The "before" column is the
     2026-08-06 sweep of section 2.
 
-[^19]: Fresh-process runs alternating the binary of commit `1bd6b3e` and the
+[^20]: Fresh-process runs alternating the binary of commit `1bd6b3e` and the
     binary of commit `1c99256`, 3k prompt, 64 slots, 512 tokens, greedy,
     2026-09-04 14:35: old 19.00 s and 20.263 tokens per second, new 14.70 s
     and 19.989, old 18.40 s and 18.457, new 15.03 s and 19.978. Load
     averages during the runs were 4.9 to 9.4.
 
-[^20]: oMLX commit messages for Lightning MTP and the fused gate and up
+[^21]: oMLX commit messages for Lightning MTP and the fused gate and up
     projection on Qwen3.6-35B-A3B, greedy, single stream, M3 Ultra: 85.2 to
     140.4 tokens per second with the multi-token-prediction head, and 104.4
     to 115.6 with the fused projection; both are the authors' own

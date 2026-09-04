@@ -126,4 +126,72 @@ import TurboFieldfareValidationSupport
         let seed: UInt64 = UInt64(m) &* 0x9E37 &+ UInt64(n)
         try Self.runAndCompare(m: m, n: n, seed: seed)
     }
+
+    /// Speculative verification runs the projections for t drafted tokens at
+    /// once. The multi-row kernel reads each weight row once and applies it
+    /// to every activation row, with the same per-row FMA order as the
+    /// single-row kernel, so its output must match t single-row dispatches
+    /// bit for bit.
+    @Test(arguments: [(rows: 2, m: 64, n: 128, offset: 0),
+                      (rows: 5, m: 200, n: 2048, offset: 2),
+                      (rows: 8, m: 1024, n: 2816, offset: 0),
+                      (rows: 9, m: 72, n: 256, offset: 0)])
+    func multiRowMatchesRepeatedSingleRowBitForBit(
+        _ c: (rows: Int, m: Int, n: Int, offset: Int)) throws {
+        var rng = SeedTree(0x4B1D).key("int4-multirow-\(c.rows)-\(c.m)-\(c.n)")
+        var weightRows: [Quantization.Int4AffineRow] = []
+        for _ in 0..<c.m {
+            weightRows.append(Quantization.quantizeInt4Affine(
+                (0..<c.n).map { _ in rng.uniform(-0.5, 0.5) }))
+        }
+        let (packed, scales, biases) = Self.packWeights(weightRows)
+        var paddedPacked = [UInt8](repeating: 0, count: packed.count + c.offset)
+        for i in 0..<packed.count { paddedPacked[c.offset + i] = packed[i] }
+        let xHalves = (0..<(c.rows * c.n)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let kernel = try DequantInt4GEMV(context: ctx)
+        guard let wBuf = ctx.device.makeBuffer(bytes: paddedPacked, length: paddedPacked.count,
+                                               options: .storageModeShared),
+              let sBuf = ctx.device.makeBuffer(bytes: scales,
+                                               length: scales.count * MemoryLayout<UInt16>.size,
+                                               options: .storageModeShared),
+              let bBuf = ctx.device.makeBuffer(bytes: biases,
+                                               length: biases.count * MemoryLayout<UInt16>.size,
+                                               options: .storageModeShared),
+              let xBuf = Fp16Buffer.make(ctx.device, halves: xHalves),
+              let ySingle = Fp16Buffer.make(ctx.device, count: c.rows * c.m),
+              let yMulti = Fp16Buffer.make(ctx.device, count: c.rows * c.m) else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+
+        let single = ctx.queue.makeCommandBuffer()!
+        for row in 0..<c.rows {
+            kernel.encode(commandBuffer: single,
+                          weights: wBuf, weightsOffset: c.offset,
+                          scales: sBuf, biases: bBuf,
+                          x: xBuf, xOffset: row * c.n * MemoryLayout<Float16>.size,
+                          y: ySingle, yOffset: row * c.m * MemoryLayout<Float16>.size,
+                          m: UInt32(c.m), n: UInt32(c.n))
+        }
+        single.commit(); single.waitUntilCompleted()
+
+        let multi = ctx.queue.makeCommandBuffer()!
+        kernel.encodeMultiRow(commandBuffer: multi,
+                              weights: wBuf, weightsOffset: c.offset,
+                              scales: sBuf, biases: bBuf,
+                              x: xBuf, xStrideElements: c.n,
+                              y: yMulti, yStrideElements: c.m,
+                              rows: c.rows,
+                              m: UInt32(c.m), n: UInt32(c.n))
+        multi.commit(); multi.waitUntilCompleted()
+
+        let count = c.rows * c.m
+        let a = Array(UnsafeBufferPointer(
+            start: ySingle.contents().bindMemory(to: UInt16.self, capacity: count), count: count))
+        let b = Array(UnsafeBufferPointer(
+            start: yMulti.contents().bindMemory(to: UInt16.self, capacity: count), count: count))
+        #expect(a == b, "rows=\(c.rows) m=\(c.m) n=\(c.n)")
+        #expect(a.contains { $0 != 0 })
+    }
 }

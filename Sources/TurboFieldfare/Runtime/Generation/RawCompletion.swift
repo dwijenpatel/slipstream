@@ -314,7 +314,7 @@ public func runRawCompletion(producer: any LogitProducer,
         if specEnabled,
            let runner = fusedRunner,
            let draft = promptLookupDraft(history: history,
-                                         maxDraft: min(8, RealForwardRunner.maxSpecTokens - 1)),
+                                         maxDraft: min(7, RealForwardRunner.maxSpecTokens - 1)),
            position + draft.count + 1 <= (producer as? any ContextWindowReporting)
                .map({ $0.maxContext }) ?? Int.max {
             runner.specCheckpoint()

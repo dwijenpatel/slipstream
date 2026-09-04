@@ -20,6 +20,11 @@ final class DequantInt4GEMV {
 
     private let pipeline: MTLComputePipelineState
     private let specializedPipelines: [Shape: MTLComputePipelineState]
+    private let multiRowPipeline: MTLComputePipelineState
+    private let multiRowSpecializedPipelines: [Shape: MTLComputePipelineState]
+    /// Activation rows one multi-row dispatch handles; the kernel keeps this
+    /// many accumulators per lane.
+    static let maxMultiRows = 8
 
     /// `additionalShapes` compiles extra constant-folded variants for a
     /// non-Gemma model's decode shapes. Measured: an unspecialized
@@ -34,17 +39,85 @@ final class DequantInt4GEMV {
         let shapes = Self.realDecodeShapes
             + additionalShapes.map { Shape(m: UInt32($0.m), n: UInt32($0.n)) }
         var specializedPipelines: [Shape: MTLComputePipelineState] = [:]
+        var multiRowSpecialized: [Shape: MTLComputePipelineState] = [:]
         for shape in shapes {
+            let constants = [
+                MetalFunctionConstant(index: 20, value: .uint32(shape.m)),
+                MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
+                MetalFunctionConstant(index: 22, value: .bool(true)),
+            ]
             specializedPipelines[shape] = try context.pipeline(
                 "dequant_int4_gemv_simd",
-                constants: [
-                    MetalFunctionConstant(index: 20, value: .uint32(shape.m)),
-                    MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
-                    MetalFunctionConstant(index: 22, value: .bool(true)),
-                ],
+                constants: constants,
+                maxTotalThreadsPerThreadgroup: 512)
+            multiRowSpecialized[shape] = try context.pipeline(
+                "dequant_int4_gemv_multirow_simd",
+                constants: constants,
                 maxTotalThreadsPerThreadgroup: 512)
         }
         self.specializedPipelines = specializedPipelines
+        self.multiRowPipeline = try context.pipeline(
+            "dequant_int4_gemv_multirow_simd",
+            constants: [],
+            maxTotalThreadsPerThreadgroup: 512)
+        self.multiRowSpecializedPipelines = multiRowSpecialized
+    }
+
+    /// `rows` activation rows at `xStrideElements` apart, one weight read per
+    /// row of W, outputs at `yStrideElements` apart. Dispatches in groups of
+    /// `maxMultiRows`; each output row is bit-identical to `encode` on that
+    /// row alone.
+    func encodeMultiRow(commandBuffer: MTLCommandBuffer,
+                        weights: MTLBuffer,
+                        weightsOffset: Int = 0,
+                        scales: MTLBuffer,
+                        scalesOffset: Int = 0,
+                        biases: MTLBuffer,
+                        biasesOffset: Int = 0,
+                        x: MTLBuffer,
+                        xOffset: Int = 0,
+                        xStrideElements: Int,
+                        y: MTLBuffer,
+                        yOffset: Int = 0,
+                        yStrideElements: Int,
+                        rows: Int,
+                        m: UInt32,
+                        n: UInt32) {
+        precondition(n % UInt32(Quantization.groupSize) == 0,
+                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(weightsOffset % 2 == 0,
+                     "dequant_int4_gemv_multirow_simd needs a 2-aligned weightsOffset, got \(weightsOffset)")
+        precondition(rows > 0)
+        let elementSize = MemoryLayout<Float16>.stride
+        var first = 0
+        while first < rows {
+            let count = min(Self.maxMultiRows, rows - first)
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            encoder.setComputePipelineState(
+                multiRowSpecializedPipelines[Shape(m: m, n: n)] ?? multiRowPipeline)
+            encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+            encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+            encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+            encoder.setBuffer(x, offset: xOffset + first * xStrideElements * elementSize, index: 3)
+            encoder.setBuffer(y, offset: yOffset + first * yStrideElements * elementSize, index: 4)
+            var mValue = m
+            var nValue = n
+            var tValue = UInt32(count)
+            var xStride = UInt32(xStrideElements)
+            var yStride = UInt32(yStrideElements)
+            encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 5)
+            encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
+            encoder.setBytes(&tValue, length: MemoryLayout<UInt32>.size, index: 7)
+            encoder.setBytes(&xStride, length: MemoryLayout<UInt32>.size, index: 8)
+            encoder.setBytes(&yStride, length: MemoryLayout<UInt32>.size, index: 9)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: (Int(m) + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup,
+                        height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32 * Self.rowsPerThreadgroup,
+                                               height: 1, depth: 1))
+            encoder.endEncoding()
+            first += count
+        }
     }
 
     func encode(commandBuffer: MTLCommandBuffer,

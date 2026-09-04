@@ -160,3 +160,41 @@ head), (b) union gather-GEMM routed FFN.
 - The KV snapshot feature composes: snapshot/restore must remain
   correct with spec decode enabled (positions only ever move forward
   at emission boundaries).
+
+## M2' v2, first kernel (2026-09-04)
+
+Built: a multi-row weights-once int4 GEMV, `dequant_int4_gemv_multirow_simd`,
+which reads each weight row once and applies it to up to 8 activation rows
+with the single-row kernel's FMA order, so each output row is bit-identical
+to a single-row dispatch (tested at 2, 5, 8, and 9 rows and at a 2-aligned
+weight offset). It now serves the q, kv, and o projections whenever a
+chunk has 2 to 31 rows, and the verify head when t <= 8. The draft cap is 7
+so a verify round is one 8-row dispatch. Not yet multi-row: the linear
+attention input projection, the shared expert, and the routed experts,
+which still run per token.
+
+Measured on the base M5, 64-slot and 128-slot cache, raw code continuation
+(`playbook/prompts/spec-code.json` is the chat form; the raw prefix is a
+`Record` class with numbered getters), 512 tokens, greedy, page cache
+leveled, outputs byte-identical between the sequential and speculative
+paths in every pair:
+
+| setting | sequential | speculative | acceptance | emitted/round | verify ms/round |
+| --- | --- | --- | --- | --- | --- |
+| 128 slots, before this kernel (recorded above) | 27.7 | 16.9 | 33.9% | 3.57 | 178 |
+| 128 slots, now | 28.6 | 22.3 | 41.6% | 3.91 | 137 |
+| 64 slots, now | 27.3 | 17.0 | 41.6% | 3.91 | 192 |
+
+Per round at 128 slots: cb1 GPU 95 ms (from ~120), wake 125 ms wall over 71
+waits, expert I/O 34 ms, head 8.8 ms (from 18), replay 37 ms. At 64 slots
+the union of a round's experts, 32 per layer, thrashes the cache and I/O
+await rises to 102 ms per round; the 128-slot figure is the one to compare
+with the pricing above. On the chat form of the same prompt the model
+reasoned in prose for all 512 tokens and acceptance fell to 22 percent.
+
+Break-even still needs the verify round near 1.3x a decode token. The two
+kernels that remain are the union gather-GEMM for the routed experts,
+which halves expert traffic and removes the per-token loop, and multi-row
+variants of the fused linear-attention input projection and the shared
+expert. The drafter is the multiplier after that: a draft head raises
+acceptance from 42 to 80 or 90 percent on this model in oMLX's measurement.
