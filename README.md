@@ -57,7 +57,9 @@ one layer, 1.77 MB on this model, so 64 slots across 40 layers cap the cache at
 4.5 GB. Slots fill only as experts are used, so the cap is a ceiling rather
 than a reservation. Sixty-four slots is the default.
 
-Time to first token, in seconds, by prompt length:
+Time to first token, in seconds, by prompt length. The slipstream rows here
+predate the prefill attention kernel of section 5, which carries the
+2026-09-04 measurement:
 
 | runtime and setting                 | peak memory | 1k   | 3k   | 12k   | 24k   |
 | ----------------------------------- | ----------- | ---- | ---- | ----- | ----- |
@@ -181,6 +183,12 @@ control on each sweep. The finding that a larger cache can be slower, because
 two caches compete for one pool of memory, came from that measurement and not
 from a model of it.
 
+**A ported prefill attention kernel for head dimension 256.** The kernel
+gpu-kernel's search produced for this shape now runs the model's ten
+full-attention layers on the M5's tensor units, with the runtime's strides
+and lengths as parameters instead of compiled-in constants. It is a port,
+not a new design; section 5 has what it measured.
+
 **Three priced negative results.** Each was built, measured, and left off. They
 are in section 4.
 
@@ -249,24 +257,58 @@ crosses break-even by itself in the recorded pricing; it is not built.
 
 ## 5. Where prefill time goes
 
-The time to first token in section 2 grows faster than the prompt. Timing each
-4096-token chunk of the 11,738-token prompt on 2026-09-04 gave 26.3, 42.8,
-and 53.3 seconds for chunks that see 4,096, 8,192, and 11,736 keys.[^17] A fit
-puts the cost at 4.4 ms per token plus about 1 microsecond per token-key pair.
-The second term is attention. It is 55 percent of the 12k prefill and about
-73 percent of the 24k one.
+Until 2026-09-04 the time to first token grew faster than the prompt. Timing
+each 4096-token chunk of the 11,738-token prompt gave 26.3, 42.8, and 53.3
+seconds for chunks that see 4,096, 8,192, and 11,736 keys.[^17] A fit put the
+cost at 4.4 ms per token plus about 1 microsecond per token-key pair. The
+second term was attention: 55 percent of the 12k prefill and about 73 percent
+of the 24k one. The cause was a kernel-selection gap. Qwen's full-attention
+layers have a head dimension of 256, the tensor-unit prefill attention kernel
+inherited from upstream accepted only Gemma's 512-wide shape, and Qwen fell
+to a scalar fallback that gave one threadgroup to each query token per head,
+ran two threadgroup barriers per key, and re-read the keys and values once
+for each of the 16 heads, at about one percent of the tensor unit's ceiling.
 
-The cause is a kernel-selection gap, not a slow kernel. Qwen's full-attention
-layers have a head dimension of 256. The tensor-unit prefill attention kernel
-inherited from upstream accepts only Gemma's 512-wide shape, so Qwen falls to
-a scalar fallback that gives one threadgroup to each query token per head,
-runs two threadgroup barriers per key, and re-reads the keys and values once
-for each of the 16 heads. It runs at about one percent of the tensor unit's
-15.4 TFLOPS ceiling. A tiled kernel for this shape is the next thing to
-build; at even 30 percent of ceiling it would cut the 24k prefill from 382
-seconds to roughly 110. Above 4,096 tokens, prefill also re-reads the expert
-pool once per chunk, about 18 GB each, which a layer-major schedule would cut
-to one read.
+The kernel that closed the gap is a port of gpu-kernel's prefill-attention
+champion: 32-query by 128-key tiles, both matrix products on the tensor units,
+a grid ordered so the eight query heads that share a key-value head walk the
+keys together, and final tiles that overlap instead of reading past the end.
+The same probe, same prompt, same machine, after the port:
+
+| chunk | tokens | keys visible at end | before | after |
+| --- | --- | --- | --- | --- |
+| 1 | 4096 | 4096 | 26.3 s | 18.3 s |
+| 2 | 4096 | 8192 | 42.8 s | 18.1 s |
+| 3 | 3544 | 11736 | 53.3 s | 16.1 s |
+
+The per-token cost no longer grows with position. At 24k the six chunks took
+between 16 and 19 seconds each, 108.9 seconds in all against 381.7 before.
+The harness then measured time to first token at the two cache sizes that
+matter, in the same round-robin protocol as section 2:[^18]
+
+| slots | 3k before | 3k after | 12k before | 12k after | 24k before | 24k after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 16 | 17.4 s | 14.5 s | 116.9 s | 53.8 s | 381.7 s | 112.2 s |
+| 64 | 17.4 s | 15.2 s | 117.0 s | 54.5 s | 381.8 s | 112.7 s |
+
+Two caveats on the "after" column. The September sweep ran on a busy machine,
+with a load average between 5 and 9 and Spotlight indexing, where the August
+sweep ran overnight on an idle one. Its decode rates read about 30 percent
+below August at every cell, and a same-session interleaved A/B put the
+pre-port binary at the same depressed rate, 20.3 and 18.5 tokens per second
+against the new binary's 20.0 and 20.0, so the drop is the machine and not
+the change; those decode figures are not quoted.[^19] The pre-port binary also
+prefilled the 3k prompt in 18.4 and 19.0 seconds that day against 17.4 in
+August, so the "after" times carry a few percent of the same load and are
+pessimistic. Section 2's tables remain the August measurement until a full
+overnight sweep replaces them.
+
+What remains is the linear term, about 4.5 ms per token at every length. Above
+4,096 tokens, prefill re-reads the expert pool once per chunk, about 18 GB
+each, which a layer-major schedule would cut to one read: about 22 seconds of
+the 112 at 24k, and nothing at 3k. The rest is the routed experts, the
+linear-attention layers, and the projections, and their shares are not yet
+attributed.
 
 ## 6. Which engine to run
 
@@ -287,7 +329,7 @@ Take mlx-lm, or LM Studio's MLX engine over it, for speed paid for in memory:
 or a second program. oMLX's own single-stream additions are large on other
 machines, 85 to 140 tokens per second on this model on an M3 Ultra by its
 authors' measurement, but no number exists for it on an M5, and several of
-its Qwen fast paths are disabled there.[^18] Take llama.cpp, or Ollama over
+its Qwen fast paths are disabled there.[^20] Take llama.cpp, or Ollama over
 it, for the widest model and quantization choice, and note its two
 configurations: resident by default at 16 GB, or expert tensors paged from
 the SSD once both `--n-cpu-moe` and `--no-mmap` are set, at which point the
@@ -355,7 +397,7 @@ serial test suite, 587 tests at the time of writing.
   technique was found wrong and what the error cost, which is why the numbers
   above carry the caveats they do.
 
-This page describes commit `01f7d5e` and measurements taken between
+This page describes commit `1c99256` and measurements taken between
 2026-08-06 and 2026-09-04.
 
 [^1]: Architecture facts from the
@@ -458,7 +500,20 @@ This page describes commit `01f7d5e` and measurements taken between
     measured. Attention FLOPs at 12k are 11.3 TFLOP, which over the fitted
     67.8 seconds is 0.17 TFLOPS against the tensor unit's measured 15.4.
 
-[^18]: oMLX commit messages for Lightning MTP and the fused gate and up
+[^18]: `playbook/fill_table.sh --only 'slipstream, (16|64) of' --contexts
+    3k,12k,24k` at commit `1c99256`, 2026-09-04 14:07 to 14:26, results in
+    `bench-results/table-20260904-140715/results.csv`. Two round-robin
+    passes, the second recorded; drift control 18.508 against 18.152
+    tokens per second at 3k, 2.0 percent. The "before" column is the
+    2026-08-06 sweep of section 2.
+
+[^19]: Fresh-process runs alternating the binary of commit `1bd6b3e` and the
+    binary of commit `1c99256`, 3k prompt, 64 slots, 512 tokens, greedy,
+    2026-09-04 14:35: old 19.00 s and 20.263 tokens per second, new 14.70 s
+    and 19.989, old 18.40 s and 18.457, new 15.03 s and 19.978. Load
+    averages during the runs were 4.9 to 9.4.
+
+[^20]: oMLX commit messages for Lightning MTP and the fused gate and up
     projection on Qwen3.6-35B-A3B, greedy, single stream, M3 Ultra: 85.2 to
     140.4 tokens per second with the multi-token-prediction head, and 104.4
     to 115.6 with the fused projection; both are the authors' own
