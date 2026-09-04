@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Accelerate
 import Metal
 @testable import TurboFieldfare
 import TurboFieldfareValidationSupport
@@ -179,36 +180,57 @@ import TurboFieldfareValidationSupport
             return Fp16Buffer.read(outBuf, count: chunk * oStride)
         }
 
+        /// The same causal softmax attention as the scalar kernel's reference,
+        /// with the two matrix products on BLAS so a 700-key case takes
+        /// milliseconds in a debug build instead of tens of seconds.
         func reference() -> [Float] {
             var out = [Float](repeating: 0, count: chunk * oStride)
             let qPerKV = qHeads / kvHeads
-            for t in 0..<chunk {
-                let last = start + t + 1
-                for qh in 0..<qHeads {
-                    let kvh = qh / qPerKV
-                    var scores = [Float](repeating: 0, count: last)
-                    var maxScore: Float = -.infinity
-                    for key in 0..<last {
-                        var s: Float = 0
-                        for d in 0..<headDim {
-                            s += q[t * qStride + qh * headDim + d]
-                                * k[key * kvStride + kvh * headDim + d]
-                        }
-                        scores[key] = s * scale
-                        maxScore = max(maxScore, scores[key])
+            let D = headDim
+            for qh in 0..<qHeads {
+                let kvh = qh / qPerKV
+                // Gather this head's Q [chunk x D], K [kvValid x D], V [kvValid x D].
+                var qh_ = [Float](repeating: 0, count: chunk * D)
+                var kh_ = [Float](repeating: 0, count: kvValid * D)
+                var vh_ = [Float](repeating: 0, count: kvValid * D)
+                for t in 0..<chunk {
+                    for d in 0..<D { qh_[t * D + d] = q[t * qStride + qh * D + d] }
+                }
+                for key in 0..<kvValid {
+                    for d in 0..<D {
+                        kh_[key * D + d] = k[key * kvStride + kvh * D + d]
+                        vh_[key * D + d] = v[key * kvStride + kvh * D + d]
                     }
+                }
+                // S = Q K^T, scaled.
+                var scores = [Float](repeating: 0, count: chunk * kvValid)
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            Int32(chunk), Int32(kvValid), Int32(D),
+                            scale, qh_, Int32(D), kh_, Int32(D),
+                            0, &scores, Int32(kvValid))
+                // Causal softmax per row: query t sees keys 0...start+t.
+                for t in 0..<chunk {
+                    let last = start + t + 1
+                    let row = t * kvValid
+                    var maxScore: Float = -.infinity
+                    for key in 0..<last { maxScore = max(maxScore, scores[row + key]) }
                     var denom: Float = 0
                     for key in 0..<last {
-                        scores[key] = Foundation.exp(scores[key] - maxScore)
-                        denom += scores[key]
+                        let e = Foundation.exp(scores[row + key] - maxScore)
+                        scores[row + key] = e
+                        denom += e
                     }
-                    for d in 0..<headDim {
-                        var acc: Float = 0
-                        for key in 0..<last {
-                            acc += scores[key] * v[key * kvStride + kvh * headDim + d]
-                        }
-                        out[t * oStride + qh * headDim + d] = acc / denom
-                    }
+                    for key in 0..<last { scores[row + key] /= denom }
+                    for key in last..<kvValid { scores[row + key] = 0 }
+                }
+                // O = P V.
+                var oh_ = [Float](repeating: 0, count: chunk * D)
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            Int32(chunk), Int32(D), Int32(kvValid),
+                            1, scores, Int32(kvValid), vh_, Int32(D),
+                            0, &oh_, Int32(D))
+                for t in 0..<chunk {
+                    for d in 0..<D { out[t * oStride + qh * D + d] = oh_[t * D + d] }
                 }
             }
             return out
