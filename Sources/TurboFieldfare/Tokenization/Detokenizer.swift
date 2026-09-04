@@ -24,13 +24,33 @@ struct GFDetokenizer {
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
+    /// Set when the vocabulary is byte-level (Qwen). That path is a byte
+    /// buffer plus a UTF-8 boundary, so it costs one token per push instead
+    /// of one full re-decode, and it never emits a partial codepoint.
+    private var byteLevel: ByteLevelStreamDecoder?
+    /// Whether an id is a special (added) token, decided once per id by the
+    /// library's own skip-special filter, which is the reference behavior.
+    private var specialByID: [Int: Bool] = [:]
 
     init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
+        self.byteLevel = Self.usesByteLevelTokens(tokenizer.tokenizer)
+            ? ByteLevelStreamDecoder()
+            : nil
+    }
+
+    /// Byte-level BPE writes a leading space as U+0120 in its token strings;
+    /// a metaspace tokenizer writes U+2581. One short tokenize tells them
+    /// apart without reading the tokenizer's configuration.
+    static func usesByteLevelTokens(_ tokenizer: any Tokenizer) -> Bool {
+        tokenizer.tokenize(text: "hello world").contains { $0.contains("Ġ") }
     }
 
     mutating func push(_ id: Int32) -> String {
         let tokenID = Int(id)
+        if byteLevel != nil {
+            return pushByteLevel(tokenID)
+        }
         let token = tokenizer.convertIdToToken(tokenID) ?? ""
         if Self.isByteFallback(token) {
             trailingByteIDs.append(tokenID)
@@ -47,7 +67,27 @@ struct GFDetokenizer {
         return commitDelta(current)
     }
 
+    private mutating func pushByteLevel(_ tokenID: Int) -> String {
+        guard let token = tokenizer.convertIdToToken(tokenID) else { return "" }
+        if isSpecial(tokenID, token) { return "" }
+        if let text = byteLevel!.push(tokenString: token) { return text }
+        // Not a byte-level string after all: let the library decode this one
+        // token on its own rather than drop it.
+        return tokenizer.decode(tokens: [tokenID], skipSpecialTokens: true)
+    }
+
+    private mutating func isSpecial(_ tokenID: Int, _ token: String) -> Bool {
+        if let known = specialByID[tokenID] { return known }
+        let special = !token.isEmpty
+            && tokenizer.decode(tokens: [tokenID], skipSpecialTokens: true).isEmpty
+        specialByID[tokenID] = special
+        return special
+    }
+
     mutating func flush() -> String {
+        if byteLevel != nil {
+            return byteLevel!.flush()
+        }
         let stableText = stableIDs.isEmpty
             ? ""
             : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
