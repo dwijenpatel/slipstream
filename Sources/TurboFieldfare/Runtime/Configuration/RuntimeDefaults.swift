@@ -40,4 +40,12 @@ public enum RuntimeDefaults {
     public static let expertCachePolicy: RuntimeExpertCachePolicy = .lfu
 
     public static let rdadvisePolicy: RDAdvicePolicyMode = .off
+
+    /// Keep the GPU clocked across decode's expert-read gaps. `auto` defers to
+    /// macOS Low Power Mode. Measured 2026-09-05 on the M5 at 16 slots with
+    /// every expert read from the SSD: decode kernels 28 -> 13 ms per token
+    /// and 9.5 -> 12.6 tok/s, output byte-identical. Where the read gaps are
+    /// short, a warm 64-slot machine, the clock is already up and the hold
+    /// costs one idle threadgroup.
+    public static let gpuClockHold: RuntimeGPUClockHold = .auto
 }

@@ -29,6 +29,7 @@ disable both truncation controls, pass `--top-k 0 --top-p 1`.
 | KV snapshot | a file path | `--kv-snapshot` | off | After a fresh prefill, writes the whole cache, including the linear-attention state, to the file. A later run with the identical prompt restores it and skips prefill. CLI only. |
 | Prompt cache mode | `off`, `single-prefix` | server `--prompt-cache-mode` | `single-prefix` | The server keeps one conversation's verified KV prefix in memory and reuses it when the next request extends that conversation exactly. |
 | Prompt prefill | on, off | none | on | Off disables the chunked prefill path. Diagnostic only. |
+| GPU clock hold | `auto`, `on`, `off` | `--gpu-clock-hold` | `auto` | Keeps one 32-thread threadgroup looping on a second command queue while decode runs, so the chip does not lower the GPU clock across the expert-read gaps. `auto` stops under macOS Low Power Mode. Measured 2026-09-05 on the 24 GB M5 at 16 slots with every expert read from the SSD: decode kernels 28 to 13 ms per token, decode 9.5 to 12.6 tokens per second, output byte-identical, prefill unchanged. Where the gaps are short, a warm 64-slot machine, the clock is already up and the hold changes nothing measurable. Energy cost is not yet measured. |
 | RDADVISE | off, default, bounded, adaptive | `--rdadvise` | off | Read-ahead advice on expert files. Measured neutral or negative on this host; kept for experiments. |
 
 ## Memory guard
@@ -56,7 +57,7 @@ Environment variables read by the CLI:
 
 | Variable | Effect |
 | --- | --- |
-| `TURBO_FIELDFARE_PHASES=1` | Prints the decode phase split after the timing footer: command-buffer encode and commit, expert I/O await, GPU waits, and the expert-cache hit and miss counters. |
+| `TURBO_FIELDFARE_PHASES=1` | Prints the decode phase split after the timing footer: command-buffer encode and commit, expert I/O await, GPU waits, the expert-cache hit and miss counters, and the GPU clock hold's policy, command-buffer count, and active seconds. |
 | `TURBO_FIELDFARE_EXPERT_NOCACHE=1` | Diagnostic: sets `F_NOCACHE` for expert reads and expert SHA verification, retaining full integrity checking and the explicit slot cache. Already-resident pages can still serve reads. See the [uncached baseline protocol](../playbook/README.md#expert-file-cache-baseline). |
 | `TURBO_FIELDFARE_IO_BASELINE=1` | CLI diagnostic: records 128-token decode windows with physical process disk reads, logical expert bytes, elapsed time, I/O await, and footprint. Enables no runtime optimization. |
 | `TURBO_FIELDFARE_PREFETCH=1` | Prefetches experts on predicted routing. Measured net negative twice; off by default. |

@@ -19,6 +19,23 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+/// Whether decode keeps one threadgroup looping on the GPU so the chip does
+/// not lower the GPU clock across expert-read gaps. `auto` defers to macOS
+/// Low Power Mode, which is the user's explicit signal to save energy.
+public enum RuntimeGPUClockHold: String, Codable, Sendable, CaseIterable {
+    case auto
+    case on
+    case off
+
+    public func holds(lowPowerMode: Bool) -> Bool {
+        switch self {
+        case .auto: return !lowPowerMode
+        case .on: return true
+        case .off: return false
+        }
+    }
+}
+
 public struct RuntimeConfiguration: Sendable, Equatable {
     // Uncapped beyond the upstream 32: slots x layers x expertStride is the
     // dominant memory block, and on machines with headroom more resident
@@ -34,6 +51,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
+    public let gpuClockHold: RuntimeGPUClockHold
 
     public init(expertCacheSlots: Int = RuntimeDefaults.expertCacheSlots,
                 expertCachePolicy: RuntimeExpertCachePolicy = RuntimeDefaults.expertCachePolicy,
@@ -41,7 +59,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillEnabled: Bool = RuntimeDefaults.prefillEnabled,
                 prefillChunkTokens: Int = RuntimeDefaults.prefillChunkTokens,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
-                forceLogitsHead: Bool = false) {
+                forceLogitsHead: Bool = false,
+                gpuClockHold: RuntimeGPUClockHold = RuntimeDefaults.gpuClockHold) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
@@ -53,6 +72,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
+        self.gpuClockHold = gpuClockHold
     }
 
     public static var production: RuntimeConfiguration {

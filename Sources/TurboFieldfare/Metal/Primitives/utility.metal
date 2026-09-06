@@ -91,3 +91,21 @@ void residual_add_fp16(
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
 
+
+// GPU clock hold: one threadgroup of register arithmetic that the runtime
+// keeps queued during decode, so the chip does not lower the GPU clock across
+// the expert-read gaps. Measured 2026-09-05 on the M5 at 16 slots, uncached:
+// decode kernels 28 -> 13 ms per token, decode 9.5 -> 12.6 tok/s. Touches no
+// model data; the store is unreachable and only keeps the loop alive.
+[[kernel, max_total_threads_per_threadgroup(32)]]
+void gpu_clock_hold(
+    device uint*   sink       [[buffer(0)]],
+    constant uint& iterations [[buffer(1)]],
+    uint           tid        [[thread_position_in_grid]]
+) {
+    uint acc = tid;
+    for (uint i = 0; i < iterations; i++) {
+        acc = acc * 1664525u + 1013904223u;
+    }
+    if (acc == 0xFFFFFFFFu) sink[0] = acc;
+}

@@ -26,6 +26,7 @@ public struct Args: Equatable, Sendable {
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice
     public var kvSnapshot: String?
+    public var gpuClockHold: RuntimeGPUClockHold
 
     public init(model: String,
                 prompt: String? = nil,
@@ -42,7 +43,8 @@ public struct Args: Equatable, Sendable {
                 expertCacheSlots: Int = RuntimeDefaults.expertCacheSlots,
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
-                kvSnapshot: String? = nil) {
+                kvSnapshot: String? = nil,
+                gpuClockHold: RuntimeGPUClockHold = RuntimeDefaults.gpuClockHold) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -58,6 +60,7 @@ public struct Args: Equatable, Sendable {
         self.stops = stops
         self.quiet = quiet
         self.prefillChunk = prefillChunk
+        self.gpuClockHold = gpuClockHold
         self.kvSnapshot = kvSnapshot
     }
 }
@@ -106,6 +109,12 @@ extension Args {
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
+      --gpu-clock-hold <mode>   Keep the GPU clocked across decode's expert
+                                read gaps: auto (default; off under macOS
+                                Low Power Mode), on, or off. Measured on a
+                                24 GB M5 at 16 slots with every expert read
+                                from the SSD: 9.5 -> 12.6 tok/s, output
+                                byte-identical.
       --expert-cache-slots <n>  Routed-expert cache slots per layer, one
                                 slot per expert (default 64 of this model's
                                 256). Allowed: 8, 16, 24, 32, 48, 64, 96,
@@ -142,6 +151,7 @@ extension Args {
         var quiet = false
         var expertCacheSlots = RuntimeDefaults.expertCacheSlots
         var rdadvise = "off"
+        var gpuClockHold = RuntimeDefaults.gpuClockHold
         var prefillChunk = PrefillChunkChoice.auto
         var kvSnapshot: String?
 
@@ -232,6 +242,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 rdadvise = value
+            case "--gpu-clock-hold":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = RuntimeGPUClockHold(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                gpuClockHold = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
             default:
@@ -264,7 +280,8 @@ extension Args {
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,
-                    kvSnapshot: kvSnapshot)
+                    kvSnapshot: kvSnapshot,
+                    gpuClockHold: gpuClockHold)
     }
 
     private static func takeValue(_ argv: [String],

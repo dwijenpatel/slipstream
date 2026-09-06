@@ -328,6 +328,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// fails with a named cause instead of a jetsam kill. Built by default
     /// from the device's working-set limit; set to nil to disable.
     public var memoryGuard: PrefillMemoryGuard?
+    /// Keeps the GPU clocked across expert-read gaps; nil when the policy is
+    /// off. See `GPUClockHold` for the measurement.
+    private let clockHold: GPUClockHold?
+    private let clockHoldPolicy: RuntimeGPUClockHold
+    /// How far each decode step pushes the hold's deadline: longer than any
+    /// token interval measured, short enough that the hold ends soon after
+    /// the last token.
+    static let clockHoldKeepAliveSeconds = 0.25
     /// Experiment switch: stage the routed-expert activation in threadgroup
     /// memory (see MoE.stageActivation). Bit-identical output either way.
     public var stageMoEActivation: Bool {
@@ -379,6 +387,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 byteCap: Self.rdadviseAdaptiveByteCap,
                 slowCallNanos: Self.rdadviseAdaptiveSlowCallNanos))
         self.rdadviseEnabled = runtimeConfiguration.rdadviseEnabled
+        self.clockHoldPolicy = runtimeConfiguration.gpuClockHold
+        self.clockHold = runtimeConfiguration.gpuClockHold == .off
+            ? nil
+            : try GPUClockHold(device: context.device, library: context.library)
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
                                      maxContext: maxContext,
@@ -829,6 +841,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  config: PrefillRuntimeConfig,
                                  into logits: MTLBuffer) async throws -> [UInt32] {
         precondition(tokens.count <= Self.maxSpecTokens)
+        touchClockHold()
         if specPrefillVerifyPath || cfg.ffnSandwichNorms || !useFusedGreedyHead {
             _ = try await prefillChunked(tokens: tokens,
                                          startPosition: startPosition,
@@ -2471,6 +2484,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               into logits: MTLBuffer,
                               emitHead: Bool,
                               outputMode: PrefillOutputMode) async throws {
+        touchClockHold()
         let kvPosition = kv?.position ?? 0
         guard kvPosition == position else {
             throw PrefillError.prefillCursorMismatch(
@@ -3405,3 +3419,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 }
 
 extension RealForwardRunner: KVSnapshotting {}
+
+// MARK: - GPU clock hold
+
+extension RealForwardRunner {
+    public struct GPUClockHoldReport: Sendable, Equatable {
+        public let policy: RuntimeGPUClockHold
+        public let submittedCommandBuffers: UInt64
+        public let activeSeconds: Double
+    }
+
+    /// What the hold did over this runner's life, for the phases footer.
+    public var gpuClockHoldReport: GPUClockHoldReport {
+        GPUClockHoldReport(policy: clockHoldPolicy,
+                           submittedCommandBuffers: clockHold?.submittedCommandBuffers ?? 0,
+                           activeSeconds: clockHold?.activeSeconds ?? 0)
+    }
+
+    /// Called at the start of every decode step and never during prefill.
+    /// Low Power Mode is read each time so a toggle mid-generation takes
+    /// effect at the next token.
+    func touchClockHold() {
+        guard let clockHold,
+              clockHoldPolicy.holds(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
+        else { return }
+        clockHold.touch(seconds: Self.clockHoldKeepAliveSeconds)
+    }
+}

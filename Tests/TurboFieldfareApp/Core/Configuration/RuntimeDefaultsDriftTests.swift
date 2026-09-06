@@ -26,6 +26,8 @@ struct RuntimeDefaultsDriftTests {
         #expect(runtime.prefillChunkTokens == RuntimeDefaults.prefillChunkTokens)
         #expect(runtime.expertCachePolicy == RuntimeDefaults.expertCachePolicy)
         #expect(runtime.rdadvisePolicy == RuntimeDefaults.rdadvisePolicy)
+        #expect(runtime.gpuClockHold == RuntimeDefaults.gpuClockHold)
+        #expect(RuntimeDefaults.gpuClockHold == .auto)
     }
 
     @Test("The Mac app's options and its PERSISTED settings both match")

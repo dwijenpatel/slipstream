@@ -1,4 +1,5 @@
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareCLICore
 
 @Suite struct CLIArgumentsTests {
@@ -66,7 +67,7 @@ import Testing
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk",
-            "--kv-snapshot",
+            "--kv-snapshot", "--gpu-clock-hold",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -140,6 +141,30 @@ import Testing
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--prefill-chunk", value,
             ])
+        }
+    }
+}
+
+@Suite struct CLIGPUClockHoldArgumentTests {
+    @Test func defaultsToTheRuntimeDefault() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(arguments.gpuClockHold == RuntimeDefaults.gpuClockHold)
+    }
+
+    @Test func parsesEveryPolicy() throws {
+        for policy in RuntimeGPUClockHold.allCases {
+            let arguments = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--gpu-clock-hold", policy.rawValue,
+            ])
+            #expect(arguments.gpuClockHold == policy)
+        }
+    }
+
+    @Test func rejectsAnUnknownPolicy() {
+        #expect(throws: ArgsError.self) {
+            try Args.parse(["--model", "m.gturbo", "--prompt", "hi",
+                            "--gpu-clock-hold", "warm"])
         }
     }
 }

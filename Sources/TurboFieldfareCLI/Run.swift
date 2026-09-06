@@ -69,7 +69,8 @@ public func run(args: Args,
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !config.isPureGreedy)
+            forceLogitsHead: !config.isPureGreedy,
+            gpuClockHold: args.gpuClockHold)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -133,8 +134,8 @@ public func run(args: Args,
                     stdout.write(Data(tail.utf8))
                 }
             }
-        ioTelemetry?.finish(runner: runner)
 
+        ioTelemetry?.finish(runner: runner)
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000
@@ -160,6 +161,13 @@ public func run(args: Args,
             lines += "  gpu cb2 (expert FFN):        " + ms(runner.totalCb2GpuNanos) + " ms\n"
             lines += "  gpu head (norm+logits):      " + ms(runner.totalHeadGpuNanos) + " ms\n"
             lines += "  cb1 wait wall:               " + ms(runner.totalCb1WaitWallNanos) + " ms\n"
+            let hold = runner.gpuClockHoldReport
+            lines += "  gpu clock hold:              " + hold.policy.rawValue
+            if hold.policy != .off {
+                lines += String(format: ", %llu command buffers, %.1f s active",
+                                hold.submittedCommandBuffers, hold.activeSeconds)
+            }
+            lines += "\n"
             if runner.specRounds > 0 {
                 let acc = 100.0 * Double(runner.specAccepted) / Double(max(1, runner.specDrafted))
                 let perRound = Double(runner.specAccepted + runner.specRounds) / Double(runner.specRounds)
