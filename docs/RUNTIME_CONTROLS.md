@@ -63,7 +63,8 @@ Environment variables read by the CLI:
 | `TURBO_FIELDFARE_EXPERT_NOCACHE=1` | Diagnostic: sets `F_NOCACHE` for expert reads and expert SHA verification, retaining full integrity checking and the explicit slot cache. Already-resident pages can still serve reads. See the [uncached baseline protocol](../playbook/README.md#expert-file-cache-baseline). |
 | `TURBO_FIELDFARE_IO_BASELINE=1` | CLI diagnostic: records 128-token decode windows with physical process disk reads, logical expert bytes, elapsed time, I/O await, and footprint. Enables no runtime optimization. |
 | `TURBO_FIELDFARE_PREFETCH=1` | Prefetches experts on predicted routing. Measured net negative twice; off by default. |
-| `TURBO_FIELDFARE_PRED_ROUTE=1` | Records predicted-routing recall without prefetching. |
+| `TURBO_FIELDFARE_PRED_ROUTE=1` | Records predicted-routing recall without prefetching: layer L+1's router applied to layer L's state, scored against layer L+1's real routing. |
+| `TURBO_FIELDFARE_PRED_ROUTE_DISTANCES=1,2,3` | The same diagnostic at several lookahead distances in one run, up to four; the footer prints recall per distance. Prefetch, when enabled, always uses distance 1. |
 | `TURBO_FIELDFARE_NO_CB_MERGE=1` | Disables the merged command-buffer decode path. The merge measured under 2 percent either way. |
 | `TURBO_FIELDFARE_SPEC=1` | Enables the speculative-decoding scaffold. Slower than plain decode until its kernels are built; see `docs/SPEC_DECODE.md`. |
 | `TURBO_FIELDFARE_SPEC_PER_TOKEN=1` | With `TURBO_FIELDFARE_SPEC=1`, verifies the routed experts with the per-token decode loop instead of the grouped union dispatch. The union is the default; it measured 2 to 3 percent faster at 64 slots and equal at 128, with byte-identical output. |

@@ -98,6 +98,13 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE"] == "1" {
             runner.predictRouting = true
         }
+        if let raw = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE_DISTANCES"] {
+            let distances = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            if !distances.isEmpty {
+                runner.predictRouting = true
+                runner.predictRoutingDistances = distances
+            }
+        }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_NO_CB_MERGE"] == "1" {
             runner.mergeCommandBuffers = false
         }
@@ -197,11 +204,11 @@ public func run(args: Args,
                                      / Double(max(1, runner.specFwdLayerWaits))) + "\n"
                 }
             }
-            if runner.predRouteTotal > 0 {
-                let recall = 100.0 * Double(runner.predRouteHits) / Double(runner.predRouteTotal)
-                lines += "  predicted-route recall@topk: "
+            for entry in runner.predictedRouteRecall where entry.total > 0 {
+                let recall = 100.0 * Double(entry.hits) / Double(entry.total)
+                lines += "  predicted-route recall@topk, distance \(entry.distance): "
                     + String(format: "%.1f", recall) + "% ("
-                    + String(runner.predRouteHits) + "/" + String(runner.predRouteTotal) + ")\n"
+                    + String(entry.hits) + "/" + String(entry.total) + ")\n"
             }
             if runner.splitCb1Phases {
                 lines += "  gpu cb1/attn linear (GDN):   " + ms(runner.totalCb1LinearAttnGpuNanos) + " ms\n"

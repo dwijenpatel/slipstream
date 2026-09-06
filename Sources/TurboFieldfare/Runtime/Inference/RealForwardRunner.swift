@@ -207,6 +207,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // against L+1's real routing next iteration. Diagnostic only; the
     // prediction is never used for computation.
     public var predictRouting = false
+    /// Lookahead distances the diagnostic scores in one pass: layer L guesses
+    /// layer L+d for each d. Prefetch always uses distance 1.
+    public var predictRoutingDistances: [Int] = [1] {
+        didSet {
+            predictRoutingDistances = Array(Set(predictRoutingDistances.filter { $0 >= 1 }))
+                .sorted().prefix(Self.maxPredictionDistances).map { $0 }
+            if predictRoutingDistances.isEmpty { predictRoutingDistances = [1] }
+            predictionLedger = RoutePredictionLedger(distances: predictRoutingDistances)
+        }
+    }
+    static let maxPredictionDistances = 4
+    private var predictionLedger = RoutePredictionLedger(distances: [1])
+    /// Recall per lookahead distance, for the phases footer.
+    public var predictedRouteRecall: [(distance: Int, hits: UInt64, total: UInt64)] {
+        predictionLedger.distances.map {
+            ($0, predictionLedger.hits[$0] ?? 0, predictionLedger.total[$0] ?? 0)
+        }
+    }
     /// Use the prediction to warm layer L+1's slot cache in the background
     /// while layer L finishes (fetch overlaps GPU + the irreducible cb1
     /// wait). Implies predictRouting.
@@ -283,11 +301,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let specPrefillVerifyPath =
         ProcessInfo.processInfo.environment["TURBO_FIELDFARE_SPEC_PREFILL_VERIFY"] == "1"
     public private(set) var lastSpecTokens: [UInt32] = []
-    private let predIndices: MTLBuffer   // [topK] UInt32
-    private let predWeights: MTLBuffer   // [topK] FP16
-    private var predPrevExperts: [Int]?  // prediction made at layer L-1 for L
-    public private(set) var predRouteHits: UInt64 = 0
-    public private(set) var predRouteTotal: UInt64 = 0
+    private let predIndicesByDistance: [MTLBuffer]   // per distance: [topK] UInt32
+    private let predWeightsByDistance: [MTLBuffer]   // per distance: [topK] FP16
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
@@ -503,8 +518,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         memset(self.zeroResidual.contents(), 0, self.zeroResidual.length)
         self.outIndices    = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(cfg.topKExperts)
-        self.predIndices   = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
-        self.predWeights   = try buf(cfg.topKExperts)
+        var predIndexBuffers: [MTLBuffer] = []
+        var predWeightBuffers: [MTLBuffer] = []
+        for _ in 0..<Self.maxPredictionDistances {
+            predIndexBuffers.append(try buf(cfg.topKExperts, MemoryLayout<UInt32>.size))
+            predWeightBuffers.append(try buf(cfg.topKExperts))
+        }
+        self.predIndicesByDistance = predIndexBuffers
+        self.predWeightsByDistance = predWeightBuffers
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize)
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
@@ -2757,29 +2778,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
-            if predictRouting, L + 1 < cfg.numLayers {
-                // Layer L+1's router on layer L's post-attention state: the
+            if predictRouting {
+                // Layer L+d's router on layer L's post-attention state: the
                 // residual-stream approximation from the prefetch
                 // literature, here measured, not trusted. Rides the
-                // existing cb1 sync; costs one tiny GEMV.
-                let nextRouter = try model.router(layer: L + 1)
-                let nextPES: (buffer: MTLBuffer, offset: Int)
-                if cfg.routerScaled {
-                    let v = try model.routerPerExpertScale(layer: L + 1)
-                    nextPES = (v.buffer, Int(v.offset))
-                } else {
-                    nextPES = (onesPerExpertScale!, 0)
+                // existing cb1 sync; costs one tiny GEMV per distance.
+                for (slot, d) in predictRoutingDistances.enumerated() where L + d < cfg.numLayers {
+                    let nextRouter = try model.router(layer: L + d)
+                    let nextPES: (buffer: MTLBuffer, offset: Int)
+                    if cfg.routerScaled {
+                        let v = try model.routerPerExpertScale(layer: L + d)
+                        nextPES = (v.buffer, Int(v.offset))
+                    } else {
+                        nextPES = (onesPerExpertScale!, 0)
+                    }
+                    moe.encodeRouterGemma4(commandBuffer: cb,
+                        weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
+                        scales:  nextRouter.buffer, scalesOffset:  Int(nextRouter.scaleOffset),
+                        biases:  nextRouter.buffer, biasesOffset:  Int(nextRouter.biasOffset),
+                        hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
+                        effectiveScale: effectiveScaleBuffers[L + d],
+                        perExpertScale: nextPES.buffer,
+                        perExpertScaleOffset: nextPES.offset,
+                        outIndices: predIndicesByDistance[slot], outWeights: predWeightsByDistance[slot],
+                        numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
                 }
-                moe.encodeRouterGemma4(commandBuffer: cb,
-                    weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
-                    scales:  nextRouter.buffer, scalesOffset:  Int(nextRouter.scaleOffset),
-                    biases:  nextRouter.buffer, biasesOffset:  Int(nextRouter.biasOffset),
-                    hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
-                    effectiveScale: effectiveScaleBuffers[L + 1],
-                    perExpertScale: nextPES.buffer,
-                    perExpertScaleOffset: nextPES.offset,
-                    outIndices: predIndices, outWeights: predWeights,
-                    numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
             }
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -2805,18 +2828,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if L == cfg.numLayers - 1 { routeTrace.flush() }
             }
             if predictRouting {
-                if let predicted = predPrevExperts {
-                    let predSet = Set(predicted)
-                    predRouteTotal &+= UInt64(experts.count)
-                    predRouteHits &+= UInt64(experts.filter { predSet.contains($0) }.count)
-                }
-                if L + 1 < cfg.numLayers {
-                    let pPtr = predIndices.contents().bindMemory(to: UInt32.self,
-                                                                 capacity: cfg.topKExperts)
-                    predPrevExperts = (0..<cfg.topKExperts).map {
+                if L == 0 { predictionLedger.reset() }
+                predictionLedger.score(layer: L, actual: experts)
+                for (slot, d) in predictRoutingDistances.enumerated() where L + d < cfg.numLayers {
+                    let pPtr = predIndicesByDistance[slot].contents()
+                        .bindMemory(to: UInt32.self, capacity: cfg.topKExperts)
+                    let predicted = (0..<cfg.topKExperts).map {
                         min(Int(pPtr[$0]), cfg.numExperts - 1)
                     }
-                    if prefetchExperts, let predicted = predPrevExperts {
+                    predictionLedger.record(fromLayer: L, experts: predicted, distance: d)
+                    if prefetchExperts, d == 1 {
                         let nextLayer = L + 1
                         let m = model
                         prefetchIssued &+= 1
@@ -2825,8 +2846,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                                 experts: predicted)
                         }
                     }
-                } else {
-                    predPrevExperts = nil
                 }
             }
 
