@@ -527,6 +527,60 @@ def describe(trace: Trace, decode_misses, decode_requests, args):
     tok_s = 1000 / (args.base_ms + io_ms)
     return misses, hit, per_token, io_ms, tok_s
 
+def cmd_predict(args):
+    """How many of the default policy's misses a no-compute predictor could
+    have prefetched: predict token t+1's experts at layer L as the top-K by
+    this layer's own transition counts from token t's batch, plus the batch
+    itself. Reports recall of misses and wasted prefetches per token."""
+    trace = read_trace(args.trace)
+    slots = args.slots
+    ks = [int(k) for k in args.k.split(",")]
+    caches = [Cache(slots, "lfu", 32) for _ in range(trace.num_layers)]
+    trans = [defaultdict(lambda: defaultdict(int)) for _ in range(trace.num_layers)]
+    prev = [None] * trace.num_layers
+    misses_total = 0
+    covered = {k: 0 for k in ks}
+    wasted = {k: 0 for k in ks}
+    predicted_total = {k: 0 for k in ks}
+    tokens = 0
+    for phase, layer, tokens_or_batches in trace.units:
+        batches = prefill_batches(tokens_or_batches) if phase == PREFILL else tokens_or_batches
+        for batch in batches:
+            cache = caches[layer]
+            resident_before = set(cache.where)
+            missed = [e for e in batch if e not in resident_before]
+            if phase == DECODE and prev[layer] is not None:
+                scores = defaultdict(float)
+                for a in prev[layer]:
+                    row = trans[layer][a]
+                    total = sum(row.values()) or 1
+                    for e, c in row.items():
+                        scores[e] += c / total
+                ranked = sorted(scores, key=lambda e: -scores[e])
+                for k in ks:
+                    pred = set(prev[layer]) | set(ranked[:k])
+                    pred_new = pred - resident_before          # what a prefetch would read
+                    predicted_total[k] += len(pred_new)
+                    covered[k] += sum(1 for e in missed if e in pred)
+                    wasted[k] += sum(1 for e in pred_new if e not in batch)
+                misses_total += len(missed)
+            cache.access(batch)
+            if phase == DECODE:
+                if prev[layer] is not None:
+                    for a in prev[layer]:
+                        for e in batch:
+                            trans[layer][a][e] += 1
+                prev[layer] = list(batch)
+                if layer == 0:
+                    tokens += 1
+    print(f"trace: {tokens} decode tokens, policy lfu-aging:32 at {slots} slots, "
+          f"{misses_total / max(1, tokens):.1f} misses per token")
+    print(f"{'K':>4} {'misses covered':>15} {'prefetch reads/tok':>19} {'wasted/tok':>11}")
+    for k in ks:
+        print(f"{k:>4} {100 * covered[k] / max(1, misses_total):>14.1f}% "
+              f"{predicted_total[k] / max(1, tokens):>19.1f} {wasted[k] / max(1, tokens):>11.1f}")
+
+
 
 def cmd_calibrate(args):
     trace = read_trace(args.trace)
@@ -630,6 +684,8 @@ def main():
     parser.add_argument("--miss-ms", type=float, default=0.36, help="cost of one SSD-served miss")
     parser.add_argument("--base-ms", type=float, default=20.0, help="non-I/O time per token")
     parser.add_argument("--expert-mb", type=float, default=1.769472, help="bytes per expert, MB")
+    pr = sub.add_parser("predict"); pr.add_argument("trace"); pr.add_argument("--slots", type=int, default=64)
+    pr.add_argument("--k", default="0,8,16,32")
     sub = parser.add_subparsers(dest="command", required=True)
     c = sub.add_parser("calibrate"); c.add_argument("trace"); c.add_argument("--slots", type=int, required=True)
     c.add_argument("--policy", default="lfu-aging:32", help="the policy the run used (default: the production default)")
@@ -640,7 +696,8 @@ def main():
     a = sub.add_parser("allocate"); a.add_argument("--train", required=True); a.add_argument("--test", required=True)
     a.add_argument("--slots", default="16,64"); a.add_argument("--max-slots", type=int, default=128)
     args = parser.parse_args()
-    {"calibrate": cmd_calibrate, "compare": cmd_compare, "allocate": cmd_allocate}[args.command](args)
+    {"calibrate": cmd_calibrate, "compare": cmd_compare, "allocate": cmd_allocate,
+     "predict": cmd_predict}[args.command](args)
 
 
 if __name__ == "__main__":
