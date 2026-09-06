@@ -105,3 +105,24 @@ and records it; `session_replay.py` replays a recorded session's user
 messages against another server configuration and checks the replies are
 byte-identical, which they must be for any cache setting. The 2026-09-05
 session and its traces are under `bench-results/route-replay-20260905`.
+
+## Overnight plan, 2026-09-06
+
+`overnight.sh` runs the measurements the review left owed, unattended after
+one password prompt for the page-cache purge:
+
+1. Uncached, behind the purge: the prefetch A/B at 64 slots (off, one layer
+   of lead, two layers, twice, interleaved); the recorded session under
+   `lfu`, `lru`, and `lfu-aging`; the session under `lfu-aging` with
+   prefetch on; prefill only at 12k and 24k.
+2. Warm, after one read of the whole model: the session under `lfu-aging`;
+   the clock hold off against auto at 64 slots; prefill only at 12k and 24k;
+   then the slot-curve sweep (`fill_table.sh --only slipstream`).
+
+Each arm is a fresh process with residency sampled before and after, and
+`overnight_summary.py` writes `SUMMARY.md` in the output directory. With
+prefetch on, the expert-cache counters count only misses at plan time, so
+compare physical bytes per token, not the hit rate. Prove the plumbing with
+`overnight.sh --smoke --skip-purge --skip-sweep`, about ten minutes; the
+smoke's session arms cap turns at 64 tokens, so their identity check is
+expected to fail.

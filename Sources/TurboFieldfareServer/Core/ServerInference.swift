@@ -171,6 +171,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                                            numLayers: model.config.numLayers,
                                                            topK: model.config.topKExperts,
                                                            numExperts: model.config.numExperts)
+        RuntimeDiagnosticSwitches(environment: ProcessInfo.processInfo.environment).apply(to: runner)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))

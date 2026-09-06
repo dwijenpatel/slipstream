@@ -217,7 +217,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             predictionLedger = RoutePredictionLedger(distances: predictRoutingDistances)
         }
     }
-    static let maxPredictionDistances = 4
+    public static let maxPredictionDistances = 4
     private var predictionLedger = RoutePredictionLedger(distances: [1])
     /// Recall per lookahead distance, for the phases footer.
     public var predictedRouteRecall: [(distance: Int, hits: UInt64, total: UInt64)] {
@@ -229,7 +229,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// while layer L finishes (fetch overlaps GPU + the irreducible cb1
     /// wait). Implies predictRouting.
     public var prefetchExperts = false
-    private var prefetchTask: Task<Void, Never>?
+    /// Layers of lead for the prefetch: the guess made at layer L feeds layer
+    /// L+d's slots. Must be one of `predictRoutingDistances`. Recall falls
+    /// about four points per layer of lead (79.7 percent at 1, 72.8 at 2 on
+    /// the 3k prompt), while the read gets a layer longer to finish.
+    public var prefetchDistance = 1
+    /// Warm tasks in flight, keyed by the layer whose slots they fill; each
+    /// is awaited before that layer plans against its slots.
+    private var prefetchTasks: [Int: Task<Void, Never>] = [:]
     public private(set) var prefetchIssued: UInt64 = 0
     /// Speculative decoding (SPEC_DECODE.md M1). Greedy path only; the
     /// controller lives in runRawCompletion and composes the primitives
@@ -2837,11 +2844,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         min(Int(pPtr[$0]), cfg.numExperts - 1)
                     }
                     predictionLedger.record(fromLayer: L, experts: predicted, distance: d)
-                    if prefetchExperts, d == 1 {
-                        let nextLayer = L + 1
+                    if prefetchExperts, d == prefetchDistance {
+                        let nextLayer = L + d
                         let m = model
                         prefetchIssued &+= 1
-                        prefetchTask = Task.detached(priority: .userInitiated) {
+                        prefetchTasks[nextLayer] = Task.detached(priority: .userInitiated) {
                             _ = try? await m.fetchRoutedExperts(layer: nextLayer,
                                                                 experts: predicted)
                         }
@@ -2849,11 +2856,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
 
-            if let t = prefetchTask {
+            if let t = prefetchTasks.removeValue(forKey: L) {
                 // Serialize same-layer streamer access: the warm task for
                 // this layer must land before we plan against its slots.
                 await t.value
-                prefetchTask = nil
             }
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)

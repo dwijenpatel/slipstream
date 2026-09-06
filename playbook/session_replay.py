@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--url", default="http://127.0.0.1:8091/v1/chat/completions")
     ap.add_argument("--model", default="qwen3.6-35b-a3b")
+    ap.add_argument("--turns", type=int, default=0, help="replay only the first N turns (0 = all)")
+    ap.add_argument("--max-tokens", type=int, default=4096, help="per-turn cap; below 4096 the identity check is expected to fail")
     args = ap.parse_args()
 
     recorded = json.load(open(args.recorded))
@@ -33,7 +35,9 @@ def main():
         if m["role"] in ("system", "user"):
             messages.append(m)
             continue
-        payload = {"model": args.model, "messages": messages, "max_tokens": 4096,
+        if args.turns and len(turns) >= args.turns:
+            break
+        payload = {"model": args.model, "messages": messages, "max_tokens": args.max_tokens,
                    "temperature": 0, "stream": False}
         req = urllib.request.Request(args.url, data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"})

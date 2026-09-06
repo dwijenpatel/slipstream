@@ -95,16 +95,7 @@ public func run(args: Args,
                                                            numLayers: model.config.numLayers,
                                                            topK: model.config.topKExperts,
                                                            numExperts: model.config.numExperts)
-        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE"] == "1" {
-            runner.predictRouting = true
-        }
-        if let raw = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE_DISTANCES"] {
-            let distances = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            if !distances.isEmpty {
-                runner.predictRouting = true
-                runner.predictRoutingDistances = distances
-            }
-        }
+        RuntimeDiagnosticSwitches(environment: ProcessInfo.processInfo.environment).apply(to: runner)
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_NO_CB_MERGE"] == "1" {
             runner.mergeCommandBuffers = false
         }
@@ -116,10 +107,6 @@ public func run(args: Args,
         }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_SPEC_PER_TOKEN"] == "1" {
             runner.specUnionGather = false
-        }
-        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PREFETCH"] == "1" {
-            runner.predictRouting = true
-            runner.prefetchExperts = true
         }
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
@@ -203,6 +190,10 @@ public func run(args: Args,
                                  Double(runner.specFwdUnionExperts)
                                      / Double(max(1, runner.specFwdLayerWaits))) + "\n"
                 }
+            }
+            if runner.prefetchExperts {
+                lines += "  prefetch:                    distance \(runner.prefetchDistance), "
+                    + String(runner.prefetchIssued) + " issued\n"
             }
             for entry in runner.predictedRouteRecall where entry.total > 0 {
                 let recall = 100.0 * Double(entry.hits) / Double(entry.total)

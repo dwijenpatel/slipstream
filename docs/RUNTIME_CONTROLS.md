@@ -62,7 +62,8 @@ Environment variables read by the CLI:
 | `TURBO_FIELDFARE_ROUTE_TRACE=<path>` | CLI and server: records the router's top-k expert IDs per token and layer, prefill and decode, to a small binary file, flushed after every token. `playbook/route_replay.py` replays it through any cache policy at any slot count. |
 | `TURBO_FIELDFARE_EXPERT_NOCACHE=1` | Diagnostic: sets `F_NOCACHE` for expert reads and expert SHA verification, retaining full integrity checking and the explicit slot cache. Already-resident pages can still serve reads. See the [uncached baseline protocol](../playbook/README.md#expert-file-cache-baseline). |
 | `TURBO_FIELDFARE_IO_BASELINE=1` | CLI diagnostic: records 128-token decode windows with physical process disk reads, logical expert bytes, elapsed time, I/O await, and footprint. Enables no runtime optimization. |
-| `TURBO_FIELDFARE_PREFETCH=1` | Prefetches experts on predicted routing. Measured net negative twice; off by default. |
+| `TURBO_FIELDFARE_PREFETCH=1` | CLI and server: prefetches experts on predicted routing. Measured net negative twice on a warm host, where the reads it moved were page-cache copies; untested where the GPU stalls on the SSD. Off by default. |
+| `TURBO_FIELDFARE_PREFETCH_DISTANCE=<1..4>` | With prefetch on, how many layers ahead the guess feeds: the read gets one layer more per step to finish, and recall falls about four points per step. Default 1. |
 | `TURBO_FIELDFARE_PRED_ROUTE=1` | Records predicted-routing recall without prefetching: layer L+1's router applied to layer L's state, scored against layer L+1's real routing. |
 | `TURBO_FIELDFARE_PRED_ROUTE_DISTANCES=1,2,3` | The same diagnostic at several lookahead distances in one run, up to four; the footer prints recall per distance. Prefetch, when enabled, always uses distance 1. |
 | `TURBO_FIELDFARE_NO_CB_MERGE=1` | Disables the merged command-buffer decode path. The merge measured under 2 percent either way. |
