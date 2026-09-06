@@ -163,6 +163,316 @@ class Cache:
         return len(misses)
 
 
+
+# --- advanced policies ------------------------------------------------------
+# Each takes a batch that must be resident together (the batch is "pinned"
+# during the plan) and returns the miss count. Capacity is `slots`.
+
+
+class LRFU:
+    """Lee et al. 2001: score = sum over uses of 2^(-lam * age). lam -> 0 is
+    LFU, large lam is LRU."""
+
+    def __init__(self, slots, lam):
+        self.slots, self.lam = slots, lam
+        self.score, self.last, self.resident = {}, {}, set()
+        self.clock = 0
+
+    def decayed(self, e):
+        return self.score.get(e, 0.0) * 2 ** (-self.lam * (self.clock - self.last.get(e, self.clock)))
+
+    def access(self, batch, next_use=None):
+        self.clock += 1
+        misses = [e for e in batch if e not in self.resident]
+        for e in batch:
+            self.score[e] = self.decayed(e) + 1.0
+            self.last[e] = self.clock
+        pinned = set(batch)
+        for e in misses:
+            if len(self.resident) >= self.slots:
+                victim = min((x for x in self.resident if x not in pinned), key=self.decayed)
+                self.resident.remove(victim)
+            self.resident.add(e)
+        return len(misses)
+
+
+class ARC:
+    """Megiddo and Modha 2003, with the batch pinned during replacement."""
+
+    def __init__(self, slots):
+        from collections import OrderedDict
+        self.c = slots
+        self.p = 0
+        self.T1, self.T2, self.B1, self.B2 = OrderedDict(), OrderedDict(), OrderedDict(), OrderedDict()
+
+    def _lru_unpinned(self, lst, pinned):
+        for e in lst:
+            if e not in pinned:
+                return e
+        return None
+
+    def _replace(self, e, pinned):
+        if self.T1 and (len(self.T1) > self.p or (e in self.B2 and len(self.T1) == self.p)):
+            v = self._lru_unpinned(self.T1, pinned)
+            if v is not None:
+                del self.T1[v]; self.B1[v] = True
+                return
+        v = self._lru_unpinned(self.T2, pinned)
+        if v is not None:
+            del self.T2[v]; self.B2[v] = True
+            return
+        v = self._lru_unpinned(self.T1, pinned)
+        if v is not None:
+            del self.T1[v]; self.B1[v] = True
+
+    def access(self, batch, next_use=None):
+        pinned = set(batch)
+        misses = 0
+        for e in batch:
+            if e in self.T1:
+                del self.T1[e]; self.T2[e] = True
+            elif e in self.T2:
+                self.T2.move_to_end(e)
+            elif e in self.B1:
+                misses += 1
+                self.p = min(self.c, self.p + max(1, len(self.B2) // max(1, len(self.B1))))
+                self._replace(e, pinned); del self.B1[e]; self.T2[e] = True
+            elif e in self.B2:
+                misses += 1
+                self.p = max(0, self.p - max(1, len(self.B1) // max(1, len(self.B2))))
+                self._replace(e, pinned); del self.B2[e]; self.T2[e] = True
+            else:
+                misses += 1
+                l1 = len(self.T1) + len(self.B1)
+                total = l1 + len(self.T2) + len(self.B2)
+                if l1 == self.c:
+                    if len(self.T1) < self.c:
+                        self.B1.popitem(last=False); self._replace(e, pinned)
+                    else:
+                        v = self._lru_unpinned(self.T1, pinned)
+                        if v is not None: del self.T1[v]
+                elif l1 < self.c and total >= self.c:
+                    if total == 2 * self.c:
+                        self.B2.popitem(last=False)
+                    self._replace(e, pinned)
+                self.T1[e] = True
+            while len(self.T1) + len(self.T2) > self.c:
+                v = self._lru_unpinned(self.T1, pinned)
+                if v is not None:
+                    del self.T1[v]; self.B1[v] = True; continue
+                v = self._lru_unpinned(self.T2, pinned)
+                if v is None:
+                    break
+                del self.T2[v]; self.B2[v] = True
+            for ghost in (self.B1, self.B2):
+                while len(ghost) > self.c:
+                    ghost.popitem(last=False)
+        return misses
+
+
+class Segmented:
+    """W-TinyLFU shape: a small LRU window in front of an aged-LFU main
+    region; a window evictee enters main only if its aged count beats the
+    main victim's, else it is dropped."""
+
+    def __init__(self, slots, window, aging=32):
+        from collections import OrderedDict
+        self.slots, self.w, self.aging = slots, window, aging
+        self.window, self.main = OrderedDict(), set()
+        self.count = defaultdict(int)
+        self.last = {}
+        self.clock = 0
+
+    def access(self, batch, next_use=None):
+        self.clock += 1
+        pinned = set(batch)
+        misses = 0
+        for e in batch:
+            self.count[e] += 1
+            self.last[e] = self.clock
+            if e in self.main:
+                continue
+            if e in self.window:
+                self.window.move_to_end(e); continue
+            misses += 1
+            self.window[e] = True
+            while len(self.window) > self.w:
+                cand = next((x for x in self.window if x not in pinned), None)
+                if cand is None:
+                    break
+                del self.window[cand]
+                if len(self.main) < self.slots - self.w:
+                    self.main.add(cand); continue
+                victim = min((x for x in self.main if x not in pinned),
+                             key=lambda x: (self.count[x], self.last[x]), default=None)
+                if victim is not None and self.count[cand] > self.count[victim]:
+                    self.main.remove(victim); self.main.add(cand)
+        if self.aging and self.clock % self.aging == 0:
+            for e in list(self.count):
+                self.count[e] //= 2
+        return misses
+
+
+class S3FIFO:
+    """Yang et al. 2023: small FIFO, main FIFO, ghost; 2-bit frequency."""
+
+    def __init__(self, slots):
+        from collections import OrderedDict, deque
+        self.slots = slots
+        self.small_cap = max(8, slots // 10)
+        self.small, self.main = deque(), deque()
+        self.ghost = OrderedDict()
+        self.freq = {}
+        self.where = {}
+
+    def _evict_small(self, pinned):
+        for _ in range(len(self.small)):
+            e = self.small.popleft()
+            if e in pinned:
+                self.small.append(e); continue
+            if self.freq[e] > 0:
+                self.freq[e] = 0; self.main.append(e); self.where[e] = "m"
+            else:
+                del self.freq[e]; del self.where[e]; self.ghost[e] = True
+                while len(self.ghost) > self.slots:
+                    self.ghost.popitem(last=False)
+            return True
+        return False
+
+    def _evict_main(self, pinned):
+        for _ in range(len(self.main) * 4):
+            e = self.main.popleft()
+            if e in pinned:
+                self.main.append(e); continue
+            if self.freq[e] > 0:
+                self.freq[e] -= 1; self.main.append(e); continue
+            del self.freq[e]; del self.where[e]
+            return True
+        return False
+
+    def access(self, batch, next_use=None):
+        pinned = set(batch)
+        misses = 0
+        for e in batch:
+            if e in self.where:
+                self.freq[e] = min(3, self.freq[e] + 1); continue
+            misses += 1
+            if e in self.ghost:
+                del self.ghost[e]; self.main.append(e); self.where[e] = "m"
+            else:
+                self.small.append(e); self.where[e] = "s"
+            self.freq[e] = 0
+            while len(self.where) > self.slots:
+                if len(self.small) >= self.small_cap:
+                    if not self._evict_small(pinned) and not self._evict_main(pinned): break
+                else:
+                    if not self._evict_main(pinned) and not self._evict_small(pinned): break
+        return misses
+
+
+class SIEVE:
+    """Zhang et al. 2024: one FIFO, a visited bit, a hand that clears bits."""
+
+    def __init__(self, slots):
+        self.slots = slots
+        self.order = []          # head at the end, tail at index 0
+        self.visited = {}
+        self.hand = 0
+
+    def access(self, batch, next_use=None):
+        pinned = set(batch)
+        misses = 0
+        for e in batch:
+            if e in self.visited:
+                self.visited[e] = True; continue
+            misses += 1
+            while len(self.order) >= self.slots:
+                if self.hand >= len(self.order):
+                    self.hand = 0
+                x = self.order[self.hand]
+                if self.visited[x] or x in pinned:
+                    self.visited[x] = False if x not in pinned else self.visited[x]
+                    self.hand += 1
+                    continue
+                del self.order[self.hand]; del self.visited[x]
+            self.order.append(e); self.visited[e] = False
+        return misses
+
+
+class TransitionAging:
+    """Aged LFU plus a MoE-shaped bias: an expert that usually follows the
+    current batch, by this layer's own token-to-token transition counts, is
+    protected in proportion to that probability."""
+
+    def __init__(self, slots, beta, aging=32):
+        self.slots, self.beta, self.aging = slots, beta, aging
+        self.count = defaultdict(int)
+        self.last = {}
+        self.resident = set()
+        self.trans = defaultdict(lambda: defaultdict(int))
+        self.rowsum = defaultdict(int)
+        self.prev = []
+        self.clock = 0
+
+    def access(self, batch, next_use=None):
+        self.clock += 1
+        pinned = set(batch)
+        for a in self.prev:
+            for e in batch:
+                self.trans[a][e] += 1
+            self.rowsum[a] += len(batch)
+        misses = [e for e in batch if e not in self.resident]
+        for e in batch:
+            self.count[e] += 1; self.last[e] = self.clock
+
+        def score(x):
+            p = sum(self.trans[a][x] / self.rowsum[a] for a in batch if self.rowsum[a])
+            return (self.count[x] + self.beta * p, self.last[x])
+
+        for e in misses:
+            if len(self.resident) >= self.slots:
+                victim = min((x for x in self.resident if x not in pinned), key=score)
+                self.resident.remove(victim)
+            self.resident.add(e)
+        self.prev = list(batch)
+        if self.aging and self.clock % self.aging == 0:
+            for e in list(self.count):
+                self.count[e] //= 2
+        return len(misses)
+
+
+def make_policy(spec: str, slots: int):
+    """Policy spec -> per-layer cache object, or None for the base Cache class."""
+    name, _, param = spec.partition(":")
+    if name == "lrfu":
+        return LRFU(slots, float(param or 0.05))
+    if name == "arc":
+        return ARC(slots)
+    if name == "segmented":
+        return Segmented(slots, max(8, slots // int(param or 8)))
+    if name == "s3fifo":
+        return S3FIFO(slots)
+    if name == "sieve":
+        return SIEVE(slots)
+    if name == "transition":
+        return TransitionAging(slots, float(param or 64))
+    return None
+
+
+def replay_advanced(trace, slots, spec):
+    caches = [make_policy(spec, slots) for _ in range(trace.num_layers)]
+    decode_misses = [0] * trace.num_layers
+    decode_requests = 0
+    for phase, layer, tokens in trace.units:
+        batches = prefill_batches(tokens) if phase == PREFILL else tokens
+        for batch in batches:
+            m = caches[layer].access(batch)
+            if phase == DECODE:
+                decode_misses[layer] += m
+                decode_requests += len(batch)
+    return decode_misses, decode_requests
+
+
 def prefill_batches(chunk_experts: list[list[int]]) -> list[list[int]]:
     """Prefill fetches a chunk's distinct experts in tiles sorted by file
     offset, which is expert order; the same slot cache absorbs them."""
@@ -239,10 +549,13 @@ def cmd_compare(args):
     for slots in slots_list:
         for policy in policies:
             name, _, param = policy.partition(":")
-            aging = int(param or 64) if name == "lfu-aging" else 0
-            window = int(param or 64) if name == "lfu-window" else 0
-            base = "lfu" if name in ("lfu-aging", "lfu-window") else name
-            dm, dr = replay(trace, [slots] * trace.num_layers, base, aging, window)
+            if make_policy(policy, slots) is not None:
+                dm, dr = replay_advanced(trace, slots, policy)
+            else:
+                aging = int(param or 64) if name == "lfu-aging" else 0
+                window = int(param or 64) if name == "lfu-window" else 0
+                base = "lfu" if name in ("lfu-aging", "lfu-window") else name
+                dm, dr = replay(trace, [slots] * trace.num_layers, base, aging, window)
             misses, hit, per_token, io_ms, tok_s = describe(trace, dm, dr, args)
             print(f"{policy:<10} {slots:>5} {100 * hit:>6.1f} {per_token:>9.1f} "
                   f"{per_token * args.expert_mb:>7.0f} {io_ms:>7.1f} {tok_s:>9.1f}")
@@ -322,7 +635,8 @@ def main():
     c.add_argument("--policy", default="lfu-aging:32", help="the policy the run used (default: the production default)")
     p = sub.add_parser("compare"); p.add_argument("trace"); p.add_argument("--slots", default="16,64,128")
     p.add_argument("--policies", default="lfu,lru,lfu-aging,belady",
-                   help="lfu-aging:N halves counts every N batches; lfu-window:W counts the last W batches")
+                   help="lfu-aging:N halves counts every N batches; lfu-window:W counts the last W batches; "
+                        "also lrfu:LAMBDA, arc, segmented:DIVISOR (window = slots/DIVISOR, min 8), s3fifo, sieve, transition:BETA")
     a = sub.add_parser("allocate"); a.add_argument("--train", required=True); a.add_argument("--test", required=True)
     a.add_argument("--slots", default="16,64"); a.add_argument("--max-slots", type=int, default=128)
     args = parser.parse_args()
