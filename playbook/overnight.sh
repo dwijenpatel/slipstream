@@ -16,7 +16,7 @@
 # Then overnight_summary.py writes SUMMARY.md.
 #
 # USAGE
-#   playbook/overnight.sh                       # the whole plan, about five hours
+#   sudo -v && playbook/overnight.sh            # the whole plan, about five hours
 #   playbook/overnight.sh --smoke --skip-purge --skip-sweep   # ten minutes, proves the plumbing
 set -u
 cd "$(dirname "$0")/.."
@@ -55,9 +55,14 @@ git -C "$REPO" rev-parse HEAD > "$OUT/commit"
 git -C "$REPO" status --short > "$OUT/status"
 
 if [ "$SKIP_PURGE" = 0 ]; then
-  say "purging the page cache (password prompt)"
-  sudo -v || exit 1
-  sudo purge || { say "purge failed"; exit 1; }
+  # Never prompt for the password in here: a prompt inside the script left
+  # Ghostty in Secure Input with the keystrokes going nowhere (2026-09-06).
+  # Authenticate in your own shell first: sudo -v && playbook/overnight.sh
+  if ! sudo -n true 2>/dev/null; then
+    echo "sudo is not authenticated; run 'sudo -v' in this shell, then start again"; exit 1
+  fi
+  say "purging the page cache"
+  sudo -n purge || { say "purge failed"; exit 1; }
 fi
 residency() { uv run "$REPO/playbook/residency.py" "$MODEL/packed_experts"; }
 say "residency after purge: $(residency)"

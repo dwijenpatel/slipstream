@@ -108,8 +108,9 @@ session and its traces are under `bench-results/route-replay-20260905`.
 
 ## Overnight plan, 2026-09-06
 
-`overnight.sh` runs the measurements the review left owed, unattended after
-one password prompt for the page-cache purge:
+`overnight.sh` runs the measurements the review left owed, unattended. It
+refuses to prompt for a password itself, so authenticate first:
+`sudo -v && playbook/overnight.sh`.
 
 1. Uncached, behind the purge: the prefetch A/B at 64 slots (off, one layer
    of lead, two layers, twice, interleaved); the recorded session under
