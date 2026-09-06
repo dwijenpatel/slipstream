@@ -28,7 +28,6 @@ into a throughput estimate.
 from __future__ import annotations
 
 import argparse
-import struct
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -63,11 +62,9 @@ def read_trace(path: str) -> Trace:
     # layer 0, then layer 1, ... A run of consecutive prefill records with one
     # layer is one (chunk, layer) unit.
     run_layer, run_phase, run_experts = None, None, []
-    decode_positions = set()
     off = 9
     while off + rec <= len(data):
         phase = data[off]
-        position = struct.unpack_from("<I", data, off + 1)[0]
         layer = data[off + 5]
         experts = list(data[off + 6 : off + 6 + top_k])
         off += rec
@@ -76,7 +73,10 @@ def read_trace(path: str) -> Trace:
                 trace.units.append((run_phase, run_layer, run_experts))
                 run_layer, run_phase, run_experts = None, None, []
             trace.units.append((DECODE, layer, [experts]))
-            decode_positions.add(position)
+            # Positions repeat after request resets; each layer-zero record
+            # represents a new decode event, even at a previously seen position.
+            if layer == 0:
+                trace.decode_tokens += 1
         else:
             if run_layer != layer:
                 if run_experts:
@@ -85,7 +85,6 @@ def read_trace(path: str) -> Trace:
             run_experts.append(experts)
     if run_experts:
         trace.units.append((run_phase, run_layer, run_experts))
-    trace.decode_tokens = len(decode_positions)
     return trace
 
 
@@ -527,6 +526,7 @@ def describe(trace: Trace, decode_misses, decode_requests, args):
     tok_s = 1000 / (args.base_ms + io_ms)
     return misses, hit, per_token, io_ms, tok_s
 
+
 def cmd_predict(args):
     """How many of the default policy's misses a no-compute predictor could
     have prefetched: predict token t+1's experts at layer L as the top-K by
@@ -579,7 +579,6 @@ def cmd_predict(args):
     for k in ks:
         print(f"{k:>4} {100 * covered[k] / max(1, misses_total):>14.1f}% "
               f"{predicted_total[k] / max(1, tokens):>19.1f} {wasted[k] / max(1, tokens):>11.1f}")
-
 
 
 def cmd_calibrate(args):
@@ -684,9 +683,9 @@ def main():
     parser.add_argument("--miss-ms", type=float, default=0.36, help="cost of one SSD-served miss")
     parser.add_argument("--base-ms", type=float, default=20.0, help="non-I/O time per token")
     parser.add_argument("--expert-mb", type=float, default=1.769472, help="bytes per expert, MB")
+    sub = parser.add_subparsers(dest="command", required=True)
     pr = sub.add_parser("predict"); pr.add_argument("trace"); pr.add_argument("--slots", type=int, default=64)
     pr.add_argument("--k", default="0,8,16,32")
-    sub = parser.add_subparsers(dest="command", required=True)
     c = sub.add_parser("calibrate"); c.add_argument("trace"); c.add_argument("--slots", type=int, required=True)
     c.add_argument("--policy", default="lfu-aging:32", help="the policy the run used (default: the production default)")
     p = sub.add_parser("compare"); p.add_argument("trace"); p.add_argument("--slots", default="16,64,128")
