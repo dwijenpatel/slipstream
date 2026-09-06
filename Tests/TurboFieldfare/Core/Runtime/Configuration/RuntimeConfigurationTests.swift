@@ -10,7 +10,11 @@ import Testing
         // the best hit rate — 192 hits 97.7% and is the slowest arm, because
         // past ~64 this cache evicts the page cache serving its own misses.
         #expect(runtime.expertCacheSlots == 64)
-        #expect(runtime.expertCachePolicy == .lfu)
+        // lfu-aging since 2026-09-05: LFU with counts halved every 32 plans.
+        // Replayed routing traces at 64 slots put plain LFU at 98.8 misses
+        // per token on a ten-turn session and aging at 71.8; on the single
+        // 3k prompt 68.6 against 62.4.
+        #expect(runtime.expertCachePolicy == .lfuAging)
         #expect(runtime.rdadvisePolicy == .off)
         #expect(!runtime.rdadviseEnabled)
         #expect(runtime.prefillPolicy == .chunked)

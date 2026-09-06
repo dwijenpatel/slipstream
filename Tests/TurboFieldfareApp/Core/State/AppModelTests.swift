@@ -21,7 +21,7 @@ import TurboFieldfare
         // copy of the default and would drift the same way the other seven did.
         #expect(request.runtimeOptions.expertCacheSlots
                 == RuntimeDefaults.expertCacheSlots)
-        #expect(request.runtimeOptions.expertCachePolicy == .lfu)
+        #expect(request.runtimeOptions.expertCachePolicy == .lfuAging)
         #expect(request.runtimeOptions.rdadvisePolicy == .off)
         #expect(request.runtimeOptions.prefillEnabled)
     }
