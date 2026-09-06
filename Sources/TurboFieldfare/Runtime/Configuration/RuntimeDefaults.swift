@@ -22,14 +22,14 @@
 public enum RuntimeDefaults {
     /// Routed-expert slots per layer.
     ///
-    /// 64 measured optimal on the M5 24 GB host: 27.76 tok/s against 25.12 at
-    /// 16, from a 6-point sweep at 3k with the drift control at 2.2%, and
-    /// +10.7% confirmed on a real agent workload. Deliberately NOT the best
-    /// hit rate — 192 slots hits 97.7% against 64's 78.7% and is the SLOWEST
-    /// arm, because past ~64 this cache evicts the OS page cache that was
+    /// 64 is the memory-for-speed default on the M5 24 GB host. The
+    /// 2026-09-06 sweep at 3k (drift control 0.8%): 27.1 tok/s at 16 slots,
+    /// 31.1 at 64, 31.9 at 128, 25.2 at 192. The last 2.6% costs 4.4 GB
+    /// more, and 192 is among the slowest arms despite the highest hit rate,
+    /// because past ~128 this cache evicts the OS page cache that was
     /// absorbing its own misses. The two compete for the same RAM, so the
     /// optimum belongs to the host, not the model. Re-measure on new hardware
-    /// rather than assuming this transfers.
+    /// rather than assuming this transfers. (August: 25.1 at 16, 27.8 at 64.)
     public static let expertCacheSlots = 64
 
     /// Prefill chunk size for surfaces that do not compute one per prompt.

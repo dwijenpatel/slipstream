@@ -73,12 +73,25 @@ public struct PrefillTransientEstimator: Sendable, Equatable {
 
     public private(set) var bytesPerToken: Double = 0
     public private(set) var samples = 0
+    /// The first chunk's growth, kept for diagnostics and never learned. It
+    /// is one-time: the expert slots become resident as the chunk streams
+    /// every expert through them, and the prefill scratch is allocated. At
+    /// 96 slots on the 12k prompt it was 7.6 GB, and extrapolating it with
+    /// the margin refused the second chunk of a process whose real peak was
+    /// 8.4 GB (sweep of 2026-09-06). A 4,096-token chunk cannot grow by
+    /// gigabytes on its own, so admitting the second chunk on the analytic
+    /// floor lets nothing through that the guard exists to stop.
+    public private(set) var firstChunkBytesPerToken: Double?
 
     public init() {}
 
     public mutating func record(deltaBytes: Int64, tokens: Int) {
         guard tokens > 0 else { return }
         let sample = max(0, Double(deltaBytes)) / Double(tokens)
+        if firstChunkBytesPerToken == nil {
+            firstChunkBytesPerToken = sample
+            return
+        }
         if samples > 0, bytesPerToken > 0, sample > bytesPerToken * Self.outlierRatio {
             return
         }

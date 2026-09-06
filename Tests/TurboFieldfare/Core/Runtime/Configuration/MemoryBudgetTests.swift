@@ -47,21 +47,36 @@ struct PrefillTransientEstimatorTests {
         #expect(e.predictedDeltaBytes(tokens: 100, floorBytesPerToken: 1_000) == 130_000)
     }
 
-    @Test func aRecordedSampleRaisesThePredictionAboveTheFloor() {
+    /// The first chunk's growth is one-time: the expert slots become resident
+    /// as prefill streams every expert through them, and the prefill scratch
+    /// is allocated. At 96 slots on the 12k prompt that was 7.6 GB, and the
+    /// guard, extrapolating it with the margin, refused the second chunk of
+    /// a process whose real peak was 8.4 GB (sweep of 2026-09-06).
+    @Test func theFirstChunksGrowthIsNotExtrapolated() {
         var e = PrefillTransientEstimator()
-        e.record(deltaBytes: 4_000_000, tokens: 1_000) // 4,000 bytes per token
+        e.record(deltaBytes: 7_600_000_000, tokens: 4_096)
+        #expect(e.bytesPerToken == 0)
+        #expect(e.predictedDeltaBytes(tokens: 4_096, floorBytesPerToken: 1_000) == 5_324_800)
+    }
+
+    @Test func theSecondSampleRaisesThePredictionAboveTheFloor() {
+        var e = PrefillTransientEstimator()
+        e.record(deltaBytes: 7_600_000_000, tokens: 4_096) // one-time, ignored
+        e.record(deltaBytes: 4_000_000, tokens: 1_000)     // 4,000 bytes per token
         #expect(e.predictedDeltaBytes(tokens: 10, floorBytesPerToken: 1_000) == 52_000)
     }
 
     @Test func theFloorWinsWhenTheMeasuredRateIsBelowIt() {
         var e = PrefillTransientEstimator()
         e.record(deltaBytes: 500, tokens: 1_000)
+        e.record(deltaBytes: 500, tokens: 1_000)
         #expect(e.predictedDeltaBytes(tokens: 10, floorBytesPerToken: 1_000) == 13_000)
     }
 
     @Test func aSingleOutlierDoesNotPoisonTheAverage() {
         var e = PrefillTransientEstimator()
-        e.record(deltaBytes: 1_000_000, tokens: 1_000)   // 1,000 per token
+        e.record(deltaBytes: 1_000_000, tokens: 1_000)   // first chunk: ignored
+        e.record(deltaBytes: 1_000_000, tokens: 1_000)   // 1,000 per token, learned
         e.record(deltaBytes: 100_000_000, tokens: 1_000) // 100,000 per token: 100x
         #expect(e.bytesPerToken < 2_000)
     }
@@ -95,12 +110,19 @@ struct PrefillMemoryGuardTests {
         }
     }
 
-    @Test func admitsAChunkThatFitsAndLearnsFromItsGrowth() throws {
-        // Before: 10 GB. After: 10.5 GB for 1,000 tokens, about 0.5 MB per token.
-        let footprints = Footprints([10 * gb, UInt64(10.5 * Double(gb)), UInt64(10.5 * Double(gb))])
+    @Test func learnsFromTheSecondChunkAndNotTheFirst() throws {
+        // Chunk 1: 10 to 10.5 GB for 1,000 tokens, the one-time fill. Chunk 2:
+        // 10.5 to 11.0 GB for 1,000 tokens, real growth of about 0.5 MB per token.
+        let footprints = Footprints([10 * gb, UInt64(10.5 * Double(gb)),
+                                     UInt64(10.5 * Double(gb)), 11 * gb,
+                                     11 * gb])
         let guard_ = PrefillMemoryGuard(budget: MemoryBudget(deviceLimitBytes: 20 * gb),
                                         floorBytesPerToken: 1_000,
                                         footprint: footprints.read)
+        try guard_.beforeChunk(tokens: 1_000)
+        guard_.afterChunk(tokens: 1_000)
+        #expect(guard_.estimator.bytesPerToken == 0)
+        // The next chunk is judged on the analytic floor alone: admitted.
         try guard_.beforeChunk(tokens: 1_000)
         guard_.afterChunk(tokens: 1_000)
         #expect(guard_.estimator.bytesPerToken > 400_000)

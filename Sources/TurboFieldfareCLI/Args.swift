@@ -122,10 +122,11 @@ extension Args {
                                 slot per expert (default 64 of this model's
                                 256). Allowed: 8, 16, 24, 32, 48, 64, 96,
                                 128, 192, 256. More slots raise the hit
-                                rate and cost RAM, and past ~64 they evict
+                                rate and cost RAM, and past ~128 they evict
                                 the OS page cache: measured on a 24 GB M5
-                                at a 3k prompt, 16 -> 64 slots is 25.1 ->
-                                27.8 tok/s and 192 slots is 17.9.
+                                at a 3k prompt (2026-09-06), 16 -> 64 -> 128
+                                slots is 27.1 -> 31.1 -> 31.9 tok/s and 192
+                                slots is 25.2.
       --expert-cache-policy <p> Slot replacement: lfu-aging (default), lfu,
                                 or lru. Aging halves LFU's use counts every
                                 32 tokens. On a recorded ten-turn coding
