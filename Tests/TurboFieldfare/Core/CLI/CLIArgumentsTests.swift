@@ -67,7 +67,7 @@ import TurboFieldfare
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk",
-            "--kv-snapshot", "--gpu-clock-hold",
+            "--kv-snapshot", "--gpu-clock-hold", "--expert-cache-policy",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -165,6 +165,30 @@ import TurboFieldfare
         #expect(throws: ArgsError.self) {
             try Args.parse(["--model", "m.gturbo", "--prompt", "hi",
                             "--gpu-clock-hold", "warm"])
+        }
+    }
+}
+
+@Suite struct CLIExpertCachePolicyArgumentTests {
+    @Test func defaultsToTheRuntimeDefault() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(arguments.expertCachePolicy == RuntimeDefaults.expertCachePolicy)
+    }
+
+    @Test func parsesBothPolicies() throws {
+        for policy in [RuntimeExpertCachePolicy.lfu, .lru] {
+            let arguments = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--expert-cache-policy", policy.rawValue,
+            ])
+            #expect(arguments.expertCachePolicy == policy)
+        }
+    }
+
+    @Test func rejectsAnUnknownPolicy() {
+        #expect(throws: ArgsError.self) {
+            try Args.parse(["--model", "m.gturbo", "--prompt", "hi",
+                            "--expert-cache-policy", "warm"])
         }
     }
 }

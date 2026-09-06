@@ -36,6 +36,7 @@ Options:
 | `--queue-limit <n>` | 4 | Requests queued behind the one running. |
 | `--prompt-cache-mode <off\|single-prefix>` | `single-prefix` | Whether to keep one conversation's KV prefix for reuse. |
 | `--expert-cache-slots <n>` | 64 | Routed-expert slots per layer. More is not always faster; see `RUNTIME_CONTROLS.md`. |
+| `--expert-cache-policy <lfu\|lru>` | `lfu` | Replacement policy for those slots; see `RUNTIME_CONTROLS.md`. |
 
 The server prefills in 4,096-token chunks, defaults to temperature 0, caps a
 completion at 4,096 tokens unless the request asks for fewer, and selects the

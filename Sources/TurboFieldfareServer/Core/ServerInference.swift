@@ -129,7 +129,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
-                            expertCacheSlots: Int) async throws -> ServerModelSession {
+                            expertCacheSlots: Int,
+                            expertCachePolicy: RuntimeExpertCachePolicy = RuntimeDefaults.expertCachePolicy) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -153,6 +154,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // give it up wholesale to be able to serve temperature > 0.
         let runtime = RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
+            expertCachePolicy: expertCachePolicy,
             prefillChunkTokens: RuntimeConfiguration.allowedPrefillChunkTokens.last!,
             forceLogitsHead: false)
         let model = try Model.load(
@@ -165,6 +167,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
+        runner.routeTrace = try RouteTrace.fromEnvironment(ProcessInfo.processInfo.environment,
+                                                           numLayers: model.config.numLayers,
+                                                           topK: model.config.topKExperts,
+                                                           numExperts: model.config.numExperts)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))

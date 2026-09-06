@@ -27,6 +27,7 @@ public struct Args: Equatable, Sendable {
     public var prefillChunk: PrefillChunkChoice
     public var kvSnapshot: String?
     public var gpuClockHold: RuntimeGPUClockHold
+    public var expertCachePolicy: RuntimeExpertCachePolicy
 
     public init(model: String,
                 prompt: String? = nil,
@@ -44,7 +45,8 @@ public struct Args: Equatable, Sendable {
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
                 kvSnapshot: String? = nil,
-                gpuClockHold: RuntimeGPUClockHold = RuntimeDefaults.gpuClockHold) {
+                gpuClockHold: RuntimeGPUClockHold = RuntimeDefaults.gpuClockHold,
+                expertCachePolicy: RuntimeExpertCachePolicy = RuntimeDefaults.expertCachePolicy) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -61,6 +63,7 @@ public struct Args: Equatable, Sendable {
         self.quiet = quiet
         self.prefillChunk = prefillChunk
         self.gpuClockHold = gpuClockHold
+        self.expertCachePolicy = expertCachePolicy
         self.kvSnapshot = kvSnapshot
     }
 }
@@ -123,6 +126,10 @@ extension Args {
                                 the OS page cache: measured on a 24 GB M5
                                 at a 3k prompt, 16 -> 64 slots is 25.1 ->
                                 27.8 tok/s and 192 slots is 17.9.
+      --expert-cache-policy <p> Slot replacement: lfu (default) or lru. On a
+                                recorded ten-turn coding session, replayed
+                                offline, lfu hit 69.1% at 64 slots and lru
+                                75.9%; on a single 3k prompt they tie.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Every
                                 chunk re-reads most of the expert pool, so
                                 auto sizes the chunk to the prompt: prefill
@@ -152,6 +159,7 @@ extension Args {
         var expertCacheSlots = RuntimeDefaults.expertCacheSlots
         var rdadvise = "off"
         var gpuClockHold = RuntimeDefaults.gpuClockHold
+        var expertCachePolicy = RuntimeDefaults.expertCachePolicy
         var prefillChunk = PrefillChunkChoice.auto
         var kvSnapshot: String?
 
@@ -248,6 +256,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 gpuClockHold = parsed
+            case "--expert-cache-policy":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = RuntimeExpertCachePolicy(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                expertCachePolicy = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
             default:
@@ -281,7 +295,8 @@ extension Args {
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,
                     kvSnapshot: kvSnapshot,
-                    gpuClockHold: gpuClockHold)
+                    gpuClockHold: gpuClockHold,
+                    expertCachePolicy: expertCachePolicy)
     }
 
     private static func takeValue(_ argv: [String],

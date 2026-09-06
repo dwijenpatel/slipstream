@@ -336,6 +336,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// token interval measured, short enough that the hold ends soon after
     /// the last token.
     static let clockHoldKeepAliveSeconds = 0.25
+    /// Records the router's choices per token and layer for offline cache
+    /// replay; nil unless `TURBO_FIELDFARE_ROUTE_TRACE` names a file.
+    public var routeTrace: RouteTrace?
     /// Experiment switch: stage the routed-expert activation in threadgroup
     /// memory (see MoE.stageActivation). Bit-identical output either way.
     public var stageMoEActivation: Bool {
@@ -2111,6 +2114,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         routeIDs.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
                         routeWeights.append(weightPtr[i])
                     }
+                    if let routeTrace {
+                        for i in 0..<t {
+                            let base = i * cfg.topKExperts
+                            routeTrace.record(phase: .prefill,
+                                              position: startPosition + i,
+                                              layer: L,
+                                              experts: (0..<cfg.topKExperts).map { Int(routeIDs[base + $0]) })
+                        }
+                        if L == cfg.numLayers - 1 { routeTrace.flush() }
+                    }
                     let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDs,
                                                                    weights: routeWeights,
                                                                    queryCount: t,
@@ -2786,6 +2799,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var experts = [Int](repeating: 0, count: cfg.topKExperts)
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
+            }
+            if let routeTrace {
+                routeTrace.record(phase: .decode, position: position, layer: L, experts: experts)
+                if L == cfg.numLayers - 1 { routeTrace.flush() }
             }
             if predictRouting {
                 if let predicted = predPrevExperts {

@@ -67,6 +67,7 @@ public func run(args: Args,
         }
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
+            expertCachePolicy: args.expertCachePolicy,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy,
@@ -90,6 +91,10 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_CB1_SPLIT"] == "1" {
             runner.splitCb1Phases = true
         }
+        runner.routeTrace = try RouteTrace.fromEnvironment(ProcessInfo.processInfo.environment,
+                                                           numLayers: model.config.numLayers,
+                                                           topK: model.config.topKExperts,
+                                                           numExperts: model.config.numExperts)
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PRED_ROUTE"] == "1" {
             runner.predictRouting = true
         }
@@ -136,6 +141,7 @@ public func run(args: Args,
             }
 
         ioTelemetry?.finish(runner: runner)
+        runner.routeTrace?.close()
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000

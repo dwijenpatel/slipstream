@@ -16,6 +16,12 @@ public struct ServerArguments: Equatable, Sendable {
     /// set by RAM competition between this cache and the OS page cache, not
     /// by hit rate, so it has to be measured per host rather than assumed.
     public let expertCacheSlots: Int
+    /// Replacement policy for those slots. Monotonic LFU keeps counts for the
+    /// life of the process, so on a long session experts that were hot early
+    /// stay resident after they stop being used; LRU adapts. Replayed on a
+    /// recorded ten-turn coding session (2026-09-05): LFU 69.1 percent hit at
+    /// 64 slots, LRU 75.9.
+    public let expertCachePolicy: RuntimeExpertCachePolicy
 
     public static let usage = """
     usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
@@ -34,6 +40,8 @@ public struct ServerArguments: Equatable, Sendable {
                              More is not always faster: past the point where
                              this cache starts evicting the OS page cache,
                              throughput falls even as hit rate rises.
+      --expert-cache-policy <lfu|lru>
+                             Replacement policy for the slots (default lfu).
       --help                 Show this help.
     """
 
@@ -45,6 +53,7 @@ public struct ServerArguments: Equatable, Sendable {
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var expertCacheSlots = RuntimeConfiguration().expertCacheSlots
+        var expertCachePolicy = RuntimeDefaults.expertCachePolicy
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -91,6 +100,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--expert-cache-slots is not supported")
                 }
                 expertCacheSlots = parsed
+            case "--expert-cache-policy":
+                guard let parsed = RuntimeExpertCachePolicy(rawValue: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--expert-cache-policy must be lfu or lru")
+                }
+                expertCachePolicy = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -102,7 +117,8 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
-                               expertCacheSlots: expertCacheSlots)
+                               expertCacheSlots: expertCacheSlots,
+                               expertCachePolicy: expertCachePolicy)
     }
 }
 

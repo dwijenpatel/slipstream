@@ -85,3 +85,23 @@ passes for a given prompt. The original warm table mode remains available.
 behavior on one Qwen expert file. Build it with `clang`, run with argument `0`
 then `1`, and inspect physical bytes on repeated reads. It is a mechanism probe,
 not a model performance benchmark.
+
+## Routing trace and cache-policy replay
+
+`TURBO_FIELDFARE_ROUTE_TRACE=<path>` makes the CLI or the server record the
+router's top-k expert IDs per token and layer, prefill and decode, to a small
+binary file. `route_replay.py` replays that trace through any slot-cache
+policy at any slot count in seconds, so one model run answers every policy
+question:
+
+```bash
+uv run playbook/route_replay.py calibrate TRACE --slots 64      # must match the run's own miss count
+uv run playbook/route_replay.py compare TRACE --slots 16,64,128 --policies lfu,lru,lfu-aging,belady
+uv run playbook/route_replay.py allocate --train A.bin,B.bin --test C.bin --slots 16,64
+```
+
+`session_turn.py` drives one turn of a multi-turn session against the server
+and records it; `session_replay.py` replays a recorded session's user
+messages against another server configuration and checks the replies are
+byte-identical, which they must be for any cache setting. The 2026-09-05
+session and its traces are under `bench-results/route-replay-20260905`.
