@@ -1,7 +1,8 @@
 #!/bin/bash
-# The overnight measurement plan of 2026-09-06. Runs unattended after one
-# password prompt for the page-cache purge. Every arm is a fresh process,
-# one model process at a time, and the machine is held awake for the run.
+# The overnight measurement plan of 2026-09-06. Runs unattended; authenticate
+# sudo in your own shell first, because the purge needs it and the script
+# never prompts. Every arm is a fresh process, one model process at a time,
+# and the machine is held awake for the run.
 #
 # Phase 1, uncached (the purge, then the cache bypass keeps the pool cold):
 #   p1  prefetch A/B at 64 slots: off, distance 1, distance 2, twice, interleaved
