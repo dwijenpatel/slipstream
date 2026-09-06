@@ -176,7 +176,7 @@ import TurboFieldfare
     }
 
     @Test func parsesBothPolicies() throws {
-        for policy in [RuntimeExpertCachePolicy.lfu, .lru] {
+        for policy in [RuntimeExpertCachePolicy.lfu, .lru, .lfuAging] {
             let arguments = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--expert-cache-policy", policy.rawValue,

@@ -15,7 +15,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     /// format. RuntimeDefaultsDriftTests pins them to the canonical values,
     /// so they cannot rot silently.
     public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: String = "lfu",
+                expertCachePolicy: String = "lfu-aging",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: String = "off",

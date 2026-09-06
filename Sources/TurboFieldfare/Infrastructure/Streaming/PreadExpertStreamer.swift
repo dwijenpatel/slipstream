@@ -51,12 +51,21 @@ public struct ExpertCachePlan: Sendable, Equatable {
 public enum ExpertCachePolicy: String, Sendable {
     case lru
     case lfu
+    /// LFU whose use counts are halved every `PreadExpertStreamer.agingPeriod`
+    /// plans, so an expert that was hot early stops outranking the experts
+    /// the work has moved on to. Replayed on a recorded ten-turn coding
+    /// session (2026-09-05) at 64 slots: plain LFU hit 69.1 percent, LRU
+    /// 75.9, this 77.6; on a single 3k prompt 78.6, 79.0, and 80.5.
+    case lfuAging = "lfu-aging"
 }
 
 /// `pread`-based routed-expert streamer with a fixed per-layer slot cache.
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
+    /// Plans between halvings under `.lfuAging`. Replayed periods of 16 to
+    /// 256: 32 was best on both traces and at both slot counts, 16 and 64.
+    public static let agingPeriod = 32
 
     public let layout: StreamLayout
     public let slotCount: Int
@@ -230,6 +239,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertUseCount.count {
             expertUseCount[expert] &+= 1
+        }
+        if cachePolicy == .lfuAging, clock % Self.agingPeriod == 0 {
+            for index in expertUseCount.indices {
+                expertUseCount[index] >>= 1
+            }
         }
         for slot in assignedSlots where slot >= 0 {
             slotLastUse[slot] = clock

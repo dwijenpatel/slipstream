@@ -28,6 +28,10 @@ struct RuntimeDefaultsDriftTests {
         #expect(runtime.rdadvisePolicy == RuntimeDefaults.rdadvisePolicy)
         #expect(runtime.gpuClockHold == RuntimeDefaults.gpuClockHold)
         #expect(RuntimeDefaults.gpuClockHold == .auto)
+        #expect(RuntimeDefaults.expertCachePolicy == .lfuAging)
+        #expect(RuntimeConfiguration(expertCachePolicy: .lfuAging).modelExpertCachePolicy == .lfuAging)
+        #expect(RuntimeConfiguration(expertCachePolicy: .lru).modelExpertCachePolicy == .lru)
+        #expect(RuntimeConfiguration(expertCachePolicy: .lfu).modelExpertCachePolicy == .lfu)
     }
 
     @Test("The Mac app's options and its PERSISTED settings both match")

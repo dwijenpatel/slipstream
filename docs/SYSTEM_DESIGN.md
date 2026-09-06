@@ -182,7 +182,9 @@ once, registered with Metal through `makeBuffer(bytesNoCopy:)`, filled with
 `pread`, and reused until the layer streamer is released.
 
 The expert cache records which expert occupies each slot. Production uses
-least-frequently used (LFU) eviction with recency as the tie-breaker. A hit
+least-frequently used (LFU) eviction with recency as the tie-breaker, and
+halves every expert's use count every 32 plans so early favorites age out
+(`lfu-aging`; plain `lfu` and `lru` remain selectable). A hit
 reuses the existing buffer. A miss assigns an evictable slot and starts a
 bounded read. Distinct misses can run in parallel, but no two reads may write
 the same slot concurrently.

@@ -37,7 +37,16 @@ public enum RuntimeDefaults {
 
     public static let prefillEnabled = true
 
-    public static let expertCachePolicy: RuntimeExpertCachePolicy = .lfu
+    /// LFU with its use counts halved every 32 plans. Monotonic LFU keeps
+    /// counts for the life of the process, so on a long session experts that
+    /// were hot early stay resident after the work moves on. Chosen
+    /// 2026-09-05 from an offline replay of routing traces: on a ten-turn
+    /// coding session at 64 slots, LFU 98.8 misses per token, LRU 77.2, this
+    /// 71.8; on a single 3k prompt 68.6, 67.2, 62.4. Fewer misses is the
+    /// whole gain where every miss is an SSD read; on a host whose page
+    /// cache holds part of the pool the leftover misses cost more each, and
+    /// LRU measured 9 percent slower there despite 22 percent fewer misses.
+    public static let expertCachePolicy: RuntimeExpertCachePolicy = .lfuAging
 
     public static let rdadvisePolicy: RDAdvicePolicyMode = .off
 

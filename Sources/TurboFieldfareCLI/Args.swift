@@ -126,10 +126,11 @@ extension Args {
                                 the OS page cache: measured on a 24 GB M5
                                 at a 3k prompt, 16 -> 64 slots is 25.1 ->
                                 27.8 tok/s and 192 slots is 17.9.
-      --expert-cache-policy <p> Slot replacement: lfu (default) or lru. On a
-                                recorded ten-turn coding session, replayed
-                                offline, lfu hit 69.1% at 64 slots and lru
-                                75.9%; on a single 3k prompt they tie.
+      --expert-cache-policy <p> Slot replacement: lfu-aging (default), lfu,
+                                or lru. Aging halves LFU's use counts every
+                                32 tokens. On a recorded ten-turn coding
+                                session, replayed offline at 64 slots, lfu
+                                hit 69.1%, lru 75.9%, lfu-aging 77.6%.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Every
                                 chunk re-reads most of the expert pool, so
                                 auto sizes the chunk to the prompt: prefill

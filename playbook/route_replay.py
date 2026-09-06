@@ -10,9 +10,9 @@ expert IDs per token and layer, prefill and decode. A cache policy's behavior
 depends only on that sequence, so one trace answers every policy at every
 slot count without another model run.
 
-    route_replay.py calibrate TRACE --slots 64
-        Decode misses under the production policy, to compare with the run's
-        own footer ("expert cache: ... miss of ...").
+    route_replay.py calibrate TRACE --slots 64 [--policy lfu-aging:32]
+        Decode misses under the run's policy, to compare with the run's own
+        footer ("expert cache: ... miss of ..."). Must match exactly.
 
     route_replay.py compare TRACE [--slots 16,64,128] [--policies lfu,lru,lfu-aging,belady]
         Decode misses per token for each policy and slot count.
@@ -97,10 +97,12 @@ class Cache:
     misses take the most evictable free slots, every requested expert counts
     one use, every touched slot records the clock."""
 
-    def __init__(self, slots: int, policy: str, aging: int = 0):
+    def __init__(self, slots: int, policy: str, aging: int = 0, window: int = 0):
         self.slots = slots
         self.policy = policy
         self.aging = aging
+        self.window = window
+        self.recent = []          # batches inside the window, oldest first
         self.slot_expert = [-1] * slots
         self.slot_last_use = [0] * slots
         self.use_count = defaultdict(int)
@@ -133,6 +135,11 @@ class Cache:
                 misses.append(e)
         for e in experts:
             self.use_count[e] += 1
+        if self.window:
+            self.recent.append(list(experts))
+            if len(self.recent) > self.window:
+                for e in self.recent.pop(0):
+                    self.use_count[e] -= 1
         if misses:
             free = [s for s in range(self.slots) if s not in reserved]
             if self.policy == "belady":
@@ -163,9 +170,9 @@ def prefill_batches(chunk_experts: list[list[int]]) -> list[list[int]]:
     return [distinct[i : i + PREFILL_TILE] for i in range(0, len(distinct), PREFILL_TILE)]
 
 
-def replay(trace: Trace, slots_per_layer, policy: str, aging: int = 0):
+def replay(trace: Trace, slots_per_layer, policy: str, aging: int = 0, window: int = 0):
     """Returns decode misses per layer and total decode requests."""
-    caches = [Cache(slots_per_layer[L], policy, aging) for L in range(trace.num_layers)]
+    caches = [Cache(slots_per_layer[L], policy, aging, window) for L in range(trace.num_layers)]
     # Belady needs each layer's future: batch index -> next batch index per expert.
     next_use_fn = [None] * trace.num_layers
     if policy == "belady":
@@ -213,9 +220,13 @@ def describe(trace: Trace, decode_misses, decode_requests, args):
 
 def cmd_calibrate(args):
     trace = read_trace(args.trace)
-    dm, dr = replay(trace, [args.slots] * trace.num_layers, "lfu")
+    name, _, param = args.policy.partition(":")
+    aging = int(param or 64) if name == "lfu-aging" else 0
+    window = int(param or 64) if name == "lfu-window" else 0
+    base = "lfu" if name in ("lfu-aging", "lfu-window") else name
+    dm, dr = replay(trace, [args.slots] * trace.num_layers, base, aging, window)
     print(f"trace: {trace.decode_tokens} decode tokens, {dr} decode expert requests")
-    print(f"lfu @ {args.slots} slots: {sum(dm)} decode misses, hit {100 * (1 - sum(dm) / dr):.1f}%")
+    print(f"{args.policy} @ {args.slots} slots: {sum(dm)} decode misses, hit {100 * (1 - sum(dm) / dr):.1f}%")
     print("compare with the run's footer: 'expert cache: H% hit, M miss of R'")
 
 
@@ -227,9 +238,11 @@ def cmd_compare(args):
     print(f"{'policy':<10} {'slots':>5} {'hit%':>6} {'miss/tok':>9} {'MB/tok':>7} {'io ms':>7} {'est tok/s':>9}")
     for slots in slots_list:
         for policy in policies:
-            aging = 64 if policy == "lfu-aging" else 0
-            base = "lfu" if policy == "lfu-aging" else policy
-            dm, dr = replay(trace, [slots] * trace.num_layers, base, aging)
+            name, _, param = policy.partition(":")
+            aging = int(param or 64) if name == "lfu-aging" else 0
+            window = int(param or 64) if name == "lfu-window" else 0
+            base = "lfu" if name in ("lfu-aging", "lfu-window") else name
+            dm, dr = replay(trace, [slots] * trace.num_layers, base, aging, window)
             misses, hit, per_token, io_ms, tok_s = describe(trace, dm, dr, args)
             print(f"{policy:<10} {slots:>5} {100 * hit:>6.1f} {per_token:>9.1f} "
                   f"{per_token * args.expert_mb:>7.0f} {io_ms:>7.1f} {tok_s:>9.1f}")
@@ -306,8 +319,10 @@ def main():
     parser.add_argument("--expert-mb", type=float, default=1.769472, help="bytes per expert, MB")
     sub = parser.add_subparsers(dest="command", required=True)
     c = sub.add_parser("calibrate"); c.add_argument("trace"); c.add_argument("--slots", type=int, required=True)
+    c.add_argument("--policy", default="lfu-aging:32", help="the policy the run used (default: the production default)")
     p = sub.add_parser("compare"); p.add_argument("trace"); p.add_argument("--slots", default="16,64,128")
-    p.add_argument("--policies", default="lfu,lru,lfu-aging,belady")
+    p.add_argument("--policies", default="lfu,lru,lfu-aging,belady",
+                   help="lfu-aging:N halves counts every N batches; lfu-window:W counts the last W batches")
     a = sub.add_parser("allocate"); a.add_argument("--train", required=True); a.add_argument("--test", required=True)
     a.add_argument("--slots", default="16,64"); a.add_argument("--max-slots", type=int, default=128)
     args = parser.parse_args()

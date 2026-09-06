@@ -14,9 +14,10 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
     case fullTensorOps2DValidityV2 = "full-tensorops-2d-validity-v2"
 }
 
-public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
+public enum RuntimeExpertCachePolicy: String, Codable, Sendable, CaseIterable {
     case lfu
     case lru
+    case lfuAging = "lfu-aging"
 }
 
 /// Whether decode keeps one threadgroup looping on the GPU so the chip does
@@ -90,6 +91,10 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         }
     }
     public var modelExpertCachePolicy: ExpertCachePolicy {
-        expertCachePolicy == .lru ? .lru : .lfu
+        switch expertCachePolicy {
+        case .lfu: return .lfu
+        case .lru: return .lru
+        case .lfuAging: return .lfuAging
+        }
     }
 }

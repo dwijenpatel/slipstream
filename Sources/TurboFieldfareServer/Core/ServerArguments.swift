@@ -40,8 +40,9 @@ public struct ServerArguments: Equatable, Sendable {
                              More is not always faster: past the point where
                              this cache starts evicting the OS page cache,
                              throughput falls even as hit rate rises.
-      --expert-cache-policy <lfu|lru>
-                             Replacement policy for the slots (default lfu).
+      --expert-cache-policy <lfu-aging|lfu|lru>
+                             Replacement policy for the slots (default
+                             lfu-aging).
       --help                 Show this help.
     """
 
@@ -103,7 +104,7 @@ public struct ServerArguments: Equatable, Sendable {
             case "--expert-cache-policy":
                 guard let parsed = RuntimeExpertCachePolicy(rawValue: value) else {
                     throw ServerArgumentError.invalid(
-                        "--expert-cache-policy must be lfu or lru")
+                        "--expert-cache-policy must be lfu-aging, lfu, or lru")
                 }
                 expertCachePolicy = parsed
             default:

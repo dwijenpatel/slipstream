@@ -15,6 +15,8 @@ struct ServerArgumentsTests {
             .expertCachePolicy == .lru)
         #expect(try ServerArguments.parse(["--model", "m.gturbo", "--expert-cache-policy", "lfu"])
             .expertCachePolicy == .lfu)
+        #expect(try ServerArguments.parse(["--model", "m.gturbo", "--expert-cache-policy", "lfu-aging"])
+            .expertCachePolicy == .lfuAging)
     }
 
     @Test func expertCachePolicyRejectsAnUnknownValue() {
