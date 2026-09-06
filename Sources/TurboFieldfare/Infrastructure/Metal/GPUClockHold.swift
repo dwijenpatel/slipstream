@@ -24,6 +24,33 @@ public final class GPUClockHold: @unchecked Sendable {
     static let iterationsPerThread: UInt32 = 50_000
     static let commandBuffersInFlight = 2
 
+    private let worker: GPUClockHoldWorker
+
+    public init(device: MTLDevice, library: MTLLibrary) throws {
+        worker = try GPUClockHoldWorker(device: device, library: library)
+    }
+
+    deinit {
+        worker.stop()
+    }
+
+    /// Keep the GPU clocked for at least `seconds` from now. Later calls only
+    /// ever push the deadline out.
+    public func touch(seconds: Double) { worker.touch(seconds: seconds) }
+
+    /// Ends the hold for good. Idempotent; also called when the owner is released.
+    public func stop() { worker.stop() }
+
+    public var isActive: Bool { worker.isActive }
+    public var submittedCommandBuffers: UInt64 { worker.submittedCommandBuffers }
+
+    /// Wall time during which the hold had a deadline ahead of it.
+    public var activeSeconds: Double { worker.activeSeconds }
+}
+
+/// The thread retains only this state, so releasing GPUClockHold can always
+/// stop and wake it, even while it waits indefinitely with no active deadline.
+private final class GPUClockHoldWorker: @unchecked Sendable {
     private let queue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let sink: MTLBuffer
@@ -35,7 +62,7 @@ public final class GPUClockHold: @unchecked Sendable {
     private var activeNanos: UInt64 = 0
     private var activeSinceNanos: UInt64?
 
-    public init(device: MTLDevice, library: MTLLibrary) throws {
+    init(device: MTLDevice, library: MTLLibrary) throws {
         guard let queue = device.makeCommandQueue() else {
             throw MetalError.noQueue
         }
@@ -49,23 +76,17 @@ public final class GPUClockHold: @unchecked Sendable {
         self.queue = queue
         self.pipeline = try device.makeComputePipelineState(function: function)
         self.sink = sink
-        let thread = Thread { [weak self] in
-            // A weak capture lets the owner's release end the loop: the
-            // thread would otherwise keep the hold alive forever.
-            while let hold = self, hold.submitOneOrWait() {}
+        let thread = Thread { [self] in
+            while self.submitOneOrWait() {}
         }
         thread.name = "gpu-clock-hold"
         thread.qualityOfService = .userInitiated
         thread.start()
     }
 
-    deinit {
-        stop()
-    }
-
     /// Keep the GPU clocked for at least `seconds` from now. Later calls only
     /// ever push the deadline out.
-    public func touch(seconds: Double) {
+    func touch(seconds: Double) {
         let now = Self.now()
         let requested = now &+ UInt64(max(0, seconds) * 1e9)
         condition.lock()
@@ -77,8 +98,8 @@ public final class GPUClockHold: @unchecked Sendable {
         condition.unlock()
     }
 
-    /// Ends the hold for good. Idempotent; called by `deinit`.
-    public func stop() {
+    /// Ends the hold for good. Idempotent; called by the owner's `deinit`.
+    func stop() {
         condition.lock()
         stopped = true
         closeActiveWindowLocked(at: Self.now())
@@ -86,20 +107,20 @@ public final class GPUClockHold: @unchecked Sendable {
         condition.unlock()
     }
 
-    public var isActive: Bool {
+    var isActive: Bool {
         condition.lock()
         defer { condition.unlock() }
         return !stopped && Self.now() < deadlineNanos
     }
 
-    public var submittedCommandBuffers: UInt64 {
+    var submittedCommandBuffers: UInt64 {
         condition.lock()
         defer { condition.unlock() }
         return submitted
     }
 
     /// Wall time during which the hold had a deadline ahead of it.
-    public var activeSeconds: Double {
+    var activeSeconds: Double {
         condition.lock()
         defer { condition.unlock() }
         var nanos = activeNanos
@@ -138,7 +159,7 @@ public final class GPUClockHold: @unchecked Sendable {
         }
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(sink, offset: 0, index: 0)
-        var iterations = Self.iterationsPerThread
+        var iterations = GPUClockHold.iterationsPerThread
         encoder.setBytes(&iterations, length: MemoryLayout<UInt32>.size, index: 1)
         encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
