@@ -111,6 +111,9 @@ public func run(args: Args,
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
+        let ioTelemetry = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_IO_BASELINE"] == "1"
+            ? IOBaselineTelemetry(output: stderr, stride: model.expertStrideBytes,
+                                  cacheEnabled: model.expertFileCacheEnabled) : nil
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -123,12 +126,14 @@ public func run(args: Args,
                 switch progress {
                 case .prefill:
                     break
-                case .token(_, _, let delta):
+                case .token(let index, _, let delta):
+                    ioTelemetry?.token(index: index, runner: runner)
                     if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
                 case .tail(let tail):
                     stdout.write(Data(tail.utf8))
                 }
             }
+        ioTelemetry?.finish(runner: runner)
 
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }

@@ -8,12 +8,16 @@ public enum Sha256Verifier {
     /// streaming through a fixed-size scratch read. Does not allocate the
     /// whole file.
     public static func hashFile(at fileURL: URL,
-                                chunkBytes: Int = 1 << 20) throws -> String {
+                                chunkBytes: Int = 1 << 20,
+                                fileCacheEnabled: Bool = true) throws -> String {
         let fd = open(fileURL.path, O_RDONLY)
         guard fd >= 0 else {
             throw ModelError.posixFailed(call: "open(\(fileURL.path))", errno: errno)
         }
         defer { close(fd) }
+        if !fileCacheEnabled, fcntl(fd, F_NOCACHE, 1) == -1 {
+            throw ModelError.posixFailed(call: "fcntl(F_NOCACHE)", errno: errno)
+        }
 
         var ctx = CC_SHA256_CTX()
         CC_SHA256_Init(&ctx)
@@ -57,8 +61,9 @@ public enum Sha256Verifier {
     /// case-insensitive on the expected side (writer outputs lowercase).
     public static func verifyFile(at fileURL: URL,
                                   named name: String,
-                                  expectedHex: String) throws {
-        let actual = try hashFile(at: fileURL)
+                                  expectedHex: String,
+                                  fileCacheEnabled: Bool = true) throws {
+        let actual = try hashFile(at: fileURL, fileCacheEnabled: fileCacheEnabled)
         if actual.lowercased() != expectedHex.lowercased() {
             throw ModelError.checksumMismatch(file: name)
         }

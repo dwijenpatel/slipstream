@@ -38,6 +38,15 @@ set -u
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 
+# Separate measurement regime: do not prewarm the model. This driver records
+# physical I/O, output identity and per-arm drift instead of assuming NOCACHE
+# bypasses pages that were already resident. Existing table behavior is intact.
+if [ "${1:-}" = "--io-baseline" ]; then
+  shift
+  cd "$REPO/playbook"
+  exec python3 io_baseline.py "$@"
+fi
+
 MODEL_GTURBO="${MODEL_GTURBO:-$HOME/models/qwen36.gturbo}"
 MODEL_GGUF="${MODEL_GGUF:-$HOME/models/qwen3.6-35b/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}"
 MODEL_MLX="${MODEL_MLX:-$HOME/models/qwen3.6-35b-mlx-4bit}"

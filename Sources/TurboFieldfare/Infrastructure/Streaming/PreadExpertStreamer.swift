@@ -78,7 +78,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .lfu) throws {
+                cachePolicy: ExpertCachePolicy = .lfu,
+                fileCacheEnabled: Bool = true) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -90,6 +91,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
         self.fd = openedFD
+        if !fileCacheEnabled, fcntl(openedFD, F_NOCACHE, 1) == -1 {
+            let error = errno
+            close(openedFD)
+            throw ModelError.posixFailed(call: "fcntl(F_NOCACHE)", errno: error)
+        }
 
         var fileStats = stat()
         if fstat(openedFD, &fileStats) == 0 {

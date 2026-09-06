@@ -6,12 +6,14 @@ import Testing
 @testable import TurboFieldfare
 
 extension PreadExpertStreamerTests {
-  @Test func preadRoundTrip_matchesTaggedBytes() throws {
+  @Test(arguments: [true, false])
+  func preadRoundTrip_matchesTaggedBytes(fileCacheEnabled: Bool) throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
     let device = try MetalContext().device
     let streamer = try PreadExpertStreamer(
-      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
+      fileCacheEnabled: fileCacheEnabled)
 
     for e in 0..<Self.numExperts {
       let r = try streamer.loadExpert(layer: 0, expert: e)

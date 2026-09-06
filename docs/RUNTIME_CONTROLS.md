@@ -57,6 +57,8 @@ Environment variables read by the CLI:
 | Variable | Effect |
 | --- | --- |
 | `TURBO_FIELDFARE_PHASES=1` | Prints the decode phase split after the timing footer: command-buffer encode and commit, expert I/O await, GPU waits, and the expert-cache hit and miss counters. |
+| `TURBO_FIELDFARE_EXPERT_NOCACHE=1` | Diagnostic: sets `F_NOCACHE` for expert reads and expert SHA verification, retaining full integrity checking and the explicit slot cache. Already-resident pages can still serve reads. See the [uncached baseline protocol](../playbook/README.md#expert-file-cache-baseline). |
+| `TURBO_FIELDFARE_IO_BASELINE=1` | CLI diagnostic: records 128-token decode windows with physical process disk reads, logical expert bytes, elapsed time, I/O await, and footprint. Enables no runtime optimization. |
 | `TURBO_FIELDFARE_PREFETCH=1` | Prefetches experts on predicted routing. Measured net negative twice; off by default. |
 | `TURBO_FIELDFARE_PRED_ROUTE=1` | Records predicted-routing recall without prefetching. |
 | `TURBO_FIELDFARE_NO_CB_MERGE=1` | Disables the merged command-buffer decode path. The merge measured under 2 percent either way. |

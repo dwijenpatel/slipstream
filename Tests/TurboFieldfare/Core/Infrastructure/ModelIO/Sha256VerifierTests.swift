@@ -14,7 +14,8 @@ import Foundation
         #expect(h == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
     }
 
-    @Test func chunkSizeDoesNotAffectDigest() throws {
+    @Test(arguments: [true, false])
+    func chunkSizeDoesNotAffectDigest(fileCacheEnabled: Bool) throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-sha-2m-\(UUID().uuidString).bin")
         // Two chunks at the default 1 MB chunkBytes — exercises the loop.
@@ -23,7 +24,8 @@ import Foundation
         try data.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let small = try Sha256Verifier.hashFile(at: url, chunkBytes: 64 << 10)
+        let small = try Sha256Verifier.hashFile(at: url, chunkBytes: 64 << 10,
+                                               fileCacheEnabled: fileCacheEnabled)
         let big   = try Sha256Verifier.hashFile(at: url)
         #expect(small == big, "chunk size must not affect digest")
     }

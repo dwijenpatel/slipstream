@@ -31,6 +31,12 @@ public struct Model {
     public let streamingMode: ExpertStreamingMode
     public let expertCachePolicy: ExpertCachePolicy
     public let integrityPolicy: ModelIntegrityPolicy
+    /// Diagnostic only: prevents new expert-file caching, but Darwin can still
+    /// serve pages already resident. Physical read telemetry must validate runs.
+    public var expertFileCacheEnabled: Bool {
+        ProcessInfo.processInfo.environment["TURBO_FIELDFARE_EXPERT_NOCACHE"] != "1"
+    }
+    public var expertStrideBytes: UInt64 { packedExpertsLayout.expertStride }
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
@@ -324,7 +330,8 @@ public struct Model {
             switch integrityPolicy {
             case .fullSha256:
                 try Sha256Verifier.verifyFile(at: url, named: manifestRel,
-                                              expectedHex: entry.sha256)
+                                              expectedHex: entry.sha256,
+                                              fileCacheEnabled: expertFileCacheEnabled)
             case .sizeCheckTrustedReceipt:
                 try Self.verifyTrustedReceiptFileSize(url: url,
                                                       relativePath: manifestRel,
@@ -350,7 +357,8 @@ public struct Model {
             layout: layout,
             device: device,
             slotCount: slotCount,
-            cachePolicy: expertCachePolicy)
+            cachePolicy: expertCachePolicy,
+            fileCacheEnabled: expertFileCacheEnabled)
     }
 
     /// Test hook: how many layer files have been opened so far.
