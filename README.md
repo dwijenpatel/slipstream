@@ -1,421 +1,284 @@
 # slipstream
 
-Mixture-of-experts inference on Apple Silicon with the weights left on the
-SSD. The memory a model uses is a setting, and the setting is measured.
+The fastest measured way to run a mixture-of-experts model on Apple Silicon
+without holding its weights in memory, at a footprint you set.
 
-[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) has 18 GB of
-expert weights.[^1] On a base M5 MacBook Pro with 24 GB of memory, slipstream
-runs it in 5.6 GB of peak footprint at 31.1 tokens per second against a
-2,940-token prompt, or in 2.5 GB at 27.1 tokens per second.[^2] The weights
-stay on the SSD. Each token routes to eight of the 256 experts in each of the
-model's 40 layers, and only those eight are read. Everything else on the
-machine keeps its memory.
+[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) is a
+mixture-of-experts model: each of its 40 layers holds 256 expert networks and
+routes every token through eight of them, and those experts are 18 GB of
+weights.[^1] A runtime that loads all of them needs 16 to 22 GB of memory
+before it counts the context window.[^2] A Mac's memory is fixed when it is
+bought. On a 24 GB laptop that leaves nothing for the editor, the browser, and
+the coding agent that drives the model, and a 16 GB laptop cannot hold the
+model at all. The usual choices are a smaller model, a shorter context, or a
+machine that swaps. slipstream is a fourth choice. It keeps the weights on the
+SSD and reads, for each token, only the eight experts that token routes to,
+into a cache whose size you choose. On a base M5 MacBook Pro with 24 GB it
+decodes at 31.1 tokens per second in 5.6 GB of memory, or 27.1 tokens per
+second in 2.5 GB, on a 2,940-token prompt.[^3] The rest of the machine keeps
+its memory, and a context of 32k tokens costs about 0.7 GB more.[^4]
 
-A prompt is paid for once. After a fresh prefill the whole cache, including
-the recurrent state of the model's linear-attention layers, can be written to
-disk. The same 2,940-token prompt that took 14.3 seconds to read comes back in
-0.03 seconds on the next run, with byte-identical output.[^3]
+slipstream is a composition of the ideas that worked in neighboring projects
+and in published research, and every one of them stayed on evidence: each was
+measured on this machine and kept or dropped on its number. From
+[TurboFieldfare](https://github.com/drumih/turbo-fieldfare) comes the
+streaming design: experts stored on the SSD so that each is one read, a cache
+of fixed size per layer, and kernels that read an expert's 4-bit weights
+once.[^5] From [oMLX](https://github.com/jundot/omlx) come a prompt cache that
+persists to disk and a memory guard on the number macOS kills a process
+on.[^6] From [gpu-kernel](https://github.com/dwijenpatel/gpu-kernel), a
+companion research repository, come kernels for the M5's tensor units, the
+matrix hardware inside each GPU core, written against the machine's measured
+ceilings rather than its data sheet.[^7] From the caching literature comes the
+expert-cache policy: least frequently used with decay, every expert's use
+count halved every 32 tokens, chosen by replaying recorded routing traces
+through nine policies against the best any policy could do with knowledge of
+the future. From the literature on offloading mixture-of-experts models came
+prefetch on predicted routing, which was built, measured, and left off. Two
+pieces are this project's own. A decode attention kernel that reads each key
+and value row once per key-value head runs at about 90 percent of the measured
+memory bandwidth. And the GPU clock is held up across SSD waits, a term this
+project has found in no published profile of a streaming runtime.
 
-This page states what was measured, on which machine, on which date, and what
-was not. The runtime design is inherited from
-[TurboFieldfare](https://github.com/drumih/turbo-fieldfare); section 3 says
-what this project adds to it.
+Every number on this page comes from a harness, the script that runs the
+measurements, built so that a run measures the code and not the state of the
+machine. The file cache, the memory the operating system lends to recently
+read files, is the largest confound on a runtime that streams from the SSD:
+the same configuration once read 14 percent faster late in a session than
+early, from warmth alone.[^8] So each configuration runs in a fresh process,
+every configuration meets the same cache state, and one configuration is
+measured again at the end to catch drift; a run whose repeat moves more than 5
+percent is discarded. The workloads are four prompts of 889 to 23,827 tokens
+and a ten-turn coding session recorded through the server and replayed.
+Section 4 lists the ideas that were measured and left out, speculative
+decoding among them.
 
-## 1. What slipstream is
+## 1. What was measured
 
-Three projects each hold one part of the problem. Resident-weight runtimes such
-as [mlx-lm](https://github.com/ml-explore/mlx-lm) are fast while the model fits
-in memory and stop working when it does not. This model runs resident on this
-machine only by exceeding the GPU's wired limit, 21.6 GB of peak footprint
-against a 21.3 GB limit, and does not fit at all on a 16 GB Mac.
-TurboFieldfare streams experts from the SSD inside a bounded memory budget,
-and its measured cost is time: 42.5 seconds to prefill a 2,940-token prompt,
-and 13.0 tokens per second at a 24k prompt. The companion research repository
-[gpu-kernel](https://github.com/dwijenpatel/gpu-kernel) measures this
-machine's real ceilings and writes Metal kernels against them, and had no
-runtime to put them in.
+Every number comes from one machine, a base M5 MacBook Pro with a 10-core GPU
+and 24 GB of memory, macOS 26.5.2, the internal SSD, and a GPU wired limit,
+the most memory macOS lets the GPU hold, of 21.3 GB. Each entry in the tables
+prefills one of four prompts of 889, 2,940, 11,738, and 23,827 tokens, prefill
+being the pass over the prompt that precedes the first token, and then
+generates 512 tokens. The slipstream rows were measured on 2026-09-06, and the
+repeated configuration at the end of that run moved 0.8 percent. The
+TurboFieldfare and llama.cpp rows were measured on 2026-08-06 on the same
+harness and prompts, with TurboFieldfare built from its own tree at its own
+defaults.[^3] Every chart on this page is a measurement made here; none is
+inferred.
 
-slipstream is TurboFieldfare's streaming runtime with kernels where measurement
-says they pay, a cache that survives the process, and one control the user
-sets: how much memory to spend. Its target machine is a laptop the user keeps
-working on while a coding model runs, which makes memory the constraint that
-binds first, before speed.
+Memory is controlled by one setting: how many of each layer's 256 experts stay
+in memory. Each expert is 1.77 MB and the setting applies to each of the 40
+layers, so keeping 16 experts per layer costs at most 1.1 GB and keeping 64
+costs at most 4.5 GB; the default is 64. The tables and charts count these as
+slots, one slot being one expert kept in memory for one layer. Peak memory in
+the tables is the process's peak physical footprint at the 2,940-token prompt,
+the number macOS compares with its limit, except in the two llama.cpp rows
+that leave the weights memory-mapped, `mmap` on. There the weights are
+file-backed and the footprint counts almost nothing, so those rows report
+resident set size, the memory the process has in use.
 
-## 2. Measured results
+![Time to first token by prompt length, log scale, for slipstream at 16 and 64 slots, TurboFieldfare at 16 slots, and llama.cpp with all weights in memory and with its experts on the CPU](docs/assets/ttft-by-prompt-length.svg)
 
-Every number in this section comes from one harness,
-`playbook/fill_table.sh`, on one machine: a base M5 with a 10-core GPU and
-24 GB, macOS 26.5.2, internal SSD, GPU wired limit 21.3 GB. Each run is a
-fresh process. The whole arm list runs in two round-robin passes and only the
-second is recorded, so every arm is equally warm. The first arm is re-run at
-the end as a drift control, and the sweep is discarded if the control moves
-more than 5 percent. The slipstream rows are the overnight sweep of
-2026-09-06, whose drift control read 0.8 percent; the TurboFieldfare and
-llama.cpp rows are the sweep of 2026-08-06, same harness, same prompt files,
-same machine.[^2] The four prompts hold 889, 2,940, 11,738, and 23,827
-tokens, and every cell generates 512 tokens.
+Read the vertical distance at 24k tokens: slipstream takes 112 seconds where
+TurboFieldfare takes 665 and llama.cpp with its experts moved to the CPU takes
+142. llama.cpp with every weight in memory takes 45 seconds, at 16.2 GB. The
+two slipstream settings lie on one line, because prefill time does not depend
+on the cache size; section 2.1 says why.
 
-The expert cache is counted in slots. One slot holds one expert's weights for
-one layer, 1.77 MB on this model, so 64 slots across 40 layers cap the cache at
-4.5 GB. Slots fill only as experts are used, so the cap is a ceiling rather
-than a reservation. Sixty-four slots is the default.
+![Decode speed by prompt length for the same five configurations](docs/assets/decode-by-prompt-length.svg)
+
+Decode speed falls with prompt length on slipstream and TurboFieldfare and
+holds on llama.cpp with all weights in memory. slipstream at 64 slots runs
+between 33.1 and 27.2 tokens per second across the four prompts, and at 16
+slots between 28.3 and 24.4; TurboFieldfare falls from 26.1 to 13.0. At 24k
+tokens slipstream at 16 slots, in 2.5 GB, decodes faster than llama.cpp with
+its experts on the CPU, in 17.2 GB.
 
 Time to first token, in seconds, by prompt length:
 
-| runtime and setting                 | peak memory | 1k   | 3k   | 12k   | 24k   |
-| ----------------------------------- | ----------- | ---- | ---- | ----- | ----- |
-| TurboFieldfare, default 16 slots    | 2.0 GB      | 14.3 | 42.5 | 185.1 | 664.8 |
-| slipstream, 16 slots                | 2.5 GB      | 8.8  | 14.1 | 53.4  | 111.6 |
-| TurboFieldfare, 32 slots            | 3.0 GB      | 15.5 | 70.5 | 265.5 | 720.5 |
-| slipstream, 32 slots                | 3.5 GB      | 8.9  | 14.3 | 53.6  | 112.0 |
-| slipstream, 64 slots (default)      | 5.6 GB      | 8.9  | 14.3 | 53.7  | 112.0 |
-| slipstream, 96 slots                | 7.8 GB      | 9.0  | 14.4 |       |       |
-| slipstream, 128 slots               | 9.9 GB      | 9.1  | 14.4 |       |       |
-| slipstream, 192 slots               | 14.2 GB     | 9.3  | 14.7 |       |       |
-| llama.cpp, default                  | 16.2 GB RSS | 1.2  | 3.8  | 18.5  | 44.9  |
-| llama.cpp, `--n-cpu-moe 32`         | 16.8 GB RSS | 2.5  | 7.8  | 35.0  | 78.2  |
-| llama.cpp, that plus `--mmap 0`     | 17.2 GB     | 2.8  | 11.0 | 51.4  | 141.8 |
-| slipstream, resuming a saved cache  | 2.5 GB      |      | 0.03 |       |       |
+| runtime and setting                        | peak memory | 1k   | 3k   | 12k   | 24k   |
+| ------------------------------------------ | ----------- | ---- | ---- | ----- | ----- |
+| TurboFieldfare, 16 slots (its default)     | 2.0 GB      | 14.3 | 42.5 | 185.1 | 664.8 |
+| TurboFieldfare, 32 slots                   | 3.0 GB      | 15.5 | 70.5 | 265.5 | 720.5 |
+| slipstream, 16 slots                       | 2.5 GB      | 8.8  | 14.1 | 53.4  | 111.6 |
+| slipstream, 32 slots                       | 3.5 GB      | 8.9  | 14.3 | 53.6  | 112.0 |
+| slipstream, 64 slots (default)             | 5.6 GB      | 8.9  | 14.3 | 53.7  | 112.0 |
+| slipstream, 96 slots                       | 7.8 GB      | 9.0  | 14.4 |       |       |
+| slipstream, 128 slots                      | 9.9 GB      | 9.1  | 14.4 |       |       |
+| slipstream, 192 slots                      | 14.2 GB     | 9.3  | 14.7 |       |       |
+| llama.cpp, all weights in memory           | 16.2 GB RSS | 1.2  | 3.8  | 18.5  | 44.9  |
+| llama.cpp, `--n-cpu-moe 32`                | 16.8 GB RSS | 2.5  | 7.8  | 35.0  | 78.2  |
+| llama.cpp, `--n-cpu-moe 32 --mmap 0`       | 17.2 GB     | 2.8  | 11.0 | 51.4  | 141.8 |
+| slipstream, resuming a saved prompt cache  | 2.5 GB      |      | 0.03 |       |       |
 
-Sustained decode, in tokens per second, by prompt length:
+Sustained decode, in tokens per second over the 512 generated tokens:
 
-| runtime and setting                 | peak memory | 1k   | 3k   | 12k  | 24k  |
-| ----------------------------------- | ----------- | ---- | ---- | ---- | ---- |
-| TurboFieldfare, default 16 slots    | 2.0 GB      | 26.1 | 23.8 | 17.2 | 13.0 |
-| slipstream, 16 slots                | 2.5 GB      | 28.3 | 27.1 | 26.2 | 24.4 |
-| TurboFieldfare, 32 slots            | 3.0 GB      | 28.1 | 25.3 | 17.5 | 13.1 |
-| slipstream, 32 slots                | 3.5 GB      | 30.6 | 29.1 | 28.1 | 26.1 |
-| slipstream, 64 slots (default)      | 5.6 GB      | 33.1 | 31.1 | 29.9 | 27.2 |
-| slipstream, 96 slots                | 7.8 GB      | 34.0 | 31.7 |      |      |
-| slipstream, 128 slots               | 9.9 GB      | 34.7 | 31.9 |       |       |
-| slipstream, 192 slots               | 14.2 GB     | 31.3 | 25.2 |       |       |
-| llama.cpp, default                  | 16.2 GB RSS | 37.6 | 38.6 | 38.3 | 38.9 |
-| llama.cpp, `--n-cpu-moe 32`         | 16.8 GB RSS | 22.9 | 22.9 | 22.9 | 23.3 |
-| llama.cpp, that plus `--mmap 0`     | 17.2 GB     | 22.3 | 20.8 | 22.0 | 20.0 |
-| mlx-lm, all weights resident        | 21.6 GB     |      | 41.2 |      |      |
+| runtime and setting                        | peak memory | 1k   | 3k   | 12k  | 24k  |
+| ------------------------------------------ | ----------- | ---- | ---- | ---- | ---- |
+| TurboFieldfare, 16 slots (its default)     | 2.0 GB      | 26.1 | 23.8 | 17.2 | 13.0 |
+| TurboFieldfare, 32 slots                   | 3.0 GB      | 28.1 | 25.3 | 17.5 | 13.1 |
+| slipstream, 16 slots                       | 2.5 GB      | 28.3 | 27.1 | 26.2 | 24.4 |
+| slipstream, 32 slots                       | 3.5 GB      | 30.6 | 29.1 | 28.1 | 26.1 |
+| slipstream, 64 slots (default)             | 5.6 GB      | 33.1 | 31.1 | 29.9 | 27.2 |
+| slipstream, 96 slots                       | 7.8 GB      | 34.0 | 31.7 |      |      |
+| slipstream, 128 slots                      | 9.9 GB      | 34.7 | 31.9 |      |      |
+| slipstream, 192 slots                      | 14.2 GB     | 31.3 | 25.2 |      |      |
+| llama.cpp, all weights in memory           | 16.2 GB RSS | 37.6 | 38.6 | 38.3 | 38.9 |
+| llama.cpp, `--n-cpu-moe 32`                | 16.8 GB RSS | 22.9 | 22.9 | 22.9 | 23.3 |
+| llama.cpp, `--n-cpu-moe 32 --mmap 0`       | 17.2 GB     | 22.3 | 20.8 | 22.0 | 20.0 |
+| mlx-lm, all weights in memory              | 21.6 GB     |      | 41.2 |      |      |
 
-Memory is peak physical footprint, which counts GPU allocations that resident
-set size misses, except in the two llama.cpp rows that leave `mmap` on. There
-the footprint counts almost nothing because the weights are file-backed, so
-those rows report resident set size instead. The llama.cpp rows come from
-`llama-bench`, which times prefill and generation directly instead of serving
-a request, so they are a best case rather than a like-for-like row.[^4] The
-mlx-lm row was measured once, at 3k, because its first run also materializes
-19 GB of lazily mapped weights and its peak sits above this machine's wired
-limit; its time to first token is left out because that run charged the
-materialization to prefill.[^5] Ollama, LM Studio's MLX engine, and
-[oMLX](https://github.com/jundot/omlx) were not measured.
+The llama.cpp rows come from `llama-bench`, which times prompt processing and
+generation as separate loops instead of serving a request, so they are a best
+case rather than a like-for-like measurement.[^9] The mlx-lm row was measured
+once, at the 3k prompt, because its 21.6 GB peak sits above the wired limit
+and its first run also materialized 19 GB of mapped weights; its time to first
+token is left out because that run charged the materialization to
+prefill.[^10] The 12k and 24k entries at 96, 128, and 192 slots are blank. The
+overnight run refused those prompts through a defect in the prefill memory
+guard, since fixed, and a daytime rerun failed its drift check.[^11] The
+resume row has no decode figure because prefill also fills the expert cache,
+so decode after a resume starts against an empty one and climbs as the slots
+refill; the honest figure is a curve, and it has not been measured.[^12]
 
-**The drift control on the slipstream sweep read 0.8 percent apart**, so
-differences of a few percent within those rows are real. The slot count's
-effect at 3k: 27.1 tokens per second at 16 slots, 31.1 at 64, 31.9 at 128, and
-25.2 at 192. More memory stops helping around 128 slots and hurts at 192,
-because the expert cache and the operating system's file cache compete for
-the same RAM: past that point the cache evicts the file pages that were
-absorbing its own misses, and the arm with the highest hit rate is among the
-slowest. An August sweep with a 2.2 percent control had put the knee at 64
-slots with the older cache policy.[^6] The optimum belongs to the host, not
-the model, and will move on a machine with a different amount of memory.
+## 2. Where the time goes
 
-The resume row has no decode figure because the number would mislead. Prefill
-also fills the expert cache, so decode after a resume starts against an empty
-one: 25.3 tokens per second before the snapshot against 13.5 over the first
-256 tokens after it, climbing as the slots refill.[^3] The honest version is a
-curve, and it has not been measured.
+Two clocks matter to a person typing at a model. The first is the wait for the
+first token, which is the prefill of the prompt. The second is the rate after
+it, which is decode. Different terms govern each, and memory reaches each by a
+different route.
 
-The TurboFieldfare comparison depends on prompt length. Comparing the 16-slot
-rows, the closest memory match to the upstream default: at 1k slipstream
-decodes 8 percent faster, at 3k 14 percent, at 12k 52 percent, and at 24k 88
-percent, because the upstream rate falls from 26.1 to 13.0 tokens per second
-across that range while slipstream holds between 28.3 and 24.4. Two things
-did that: the decode attention kernel of section 3, which cut the part of
-each token that grows with context, and the cache policy and clock hold
-below, which lifted every cell. Time to first token moved from a larger
-prefill chunk and the prefill attention kernel of section 5: 42.5 to 14.1
-seconds at 3k and 664.8 to 111.6 at 24k.
+### 2.1 Time to first token
 
-### What moved the numbers since August
+Prefill runs the prompt through the model in chunks of up to 4,096 tokens.
+Each chunk streams the experts its tokens route to, which on this model is
+most of the 18 GB pool, so the number of chunks sets the expert traffic, not
+the number of tokens. A 2,940-token prompt processed as one chunk reads 38 GB
+where 128-token chunks read 247 GB, and its prefill takes 18.5 seconds instead
+of 63.3.[^13] Above 4,096 tokens the runtime reads the pool once per chunk,
+and whether those reads come from the file cache or the SSD makes no
+measurable difference: at 12k the prefill took 54.3 seconds with the file
+cache empty, so that every expert came from the SSD, and 53.9 with the cache
+holding the pool, and at 24k 112.6 against 112.4.[^14] Cold and warm, from
+here on, name those two states. The reads hide behind the GPU.
 
-Three changes account for the difference between this sweep and the one of
-2026-08-06, and each carries its own measurement.
+What remains is compute, and it is linear in the prompt: about 4.5 ms per
+token at every length, 14.3 seconds at 3k and 112 at 24k. It was not always
+linear. Until 2026-09-04 the ten full-attention layers, where each token's
+query is scored against every earlier token's key, ran on a kernel that gave
+one group of GPU threads to each query token and re-read the keys and values
+once for each of the 16 query heads, at about one percent of the tensor unit's
+ceiling, so the cost of a chunk grew with the number of keys already in
+context. A kernel ported from gpu-kernel replaced it: tiles of 32 queries by
+128 keys, both matrix products on the tensor units, and the eight query heads
+that share a key-value head walking the keys together. The three chunks of the
+12k prompt took 18.3, 18.1, and 16.1 seconds where they had taken 26.3, 42.8,
+and 53.3, and the time to first token went from 116.9 seconds to 53.4 at 12k
+and from 381.7 to 111.6 at 24k.[^15]
 
-**The prefill attention kernel** of section 5, ported on 2026-09-04, took
-the 12k time to first token from 116.9 seconds to 53.4 and the 24k one from
-381.7 to 111.6. Before it, the model's ten full-attention layers ran on a
-scalar fallback at about one percent of the tensor unit's ceiling.
+The slot count does not touch time to first token until it starves the file
+cache. From 16 to 128 slots the 3k prefill takes 14.1 to 14.4 seconds. At 192
+slots the cache alone holds 13.6 GB, the file cache has nothing left to absorb
+the per-chunk re-reads, and the 12k prefill measured 145 seconds against 117
+in August and 88 against 53 in September. Both of those runs failed their
+drift check, so the size of the cliff is uncertain and its direction is
+not.[^16]
 
-**LFU with aging** replaced the inherited least-frequently-used cache policy
-on 2026-09-05. The runtime now records which experts the router chose per
-token and layer, and a policy's behavior depends only on that sequence, so
-one trace replays any policy at any slot count in seconds, and the replay
-reproduces the runtime's own miss counters. On a recorded ten-turn coding
-session the old policy kept early favorites resident after the work moved on:
-98.8 misses per token at 64 slots, against 71.8 with every expert's use count
-halved every 32 tokens. Replayed against LRU, ARC, LRFU, S3-FIFO, and SIEVE,
-none did better, and the offline optimum sat at 39. With every expert read
-from the SSD, the session ran 15 percent faster under the new policy, and on
-a warm machine 7 percent faster.[^7]
+A prompt is paid for once per process. After a fresh prefill the command-line
+tool can write the whole cache to disk, including the state of the thirty
+linear-attention layers, which carry a fixed-size state forward token by token
+instead of the growing store of keys and values that full attention keeps, so
+that state cannot be sliced by token. In August the 2,940-token prompt took
+17.65 seconds to prefill and came back in 0.03 seconds on the next run, with
+byte-identical output.[^12] The server keeps one conversation's prefix in
+memory, so each turn of a coding agent prefills only its new tokens.
 
-**A GPU clock hold**, landed 2026-09-05, keeps one 32-thread threadgroup
-looping on a second command queue while decode runs. At 16 slots with every
-expert read from the SSD, the same decode kernels had taken 28 ms per token
-instead of the 13 ms they take on a warm machine, because the chip lowered
-the GPU clock during each layer's read gap; holding the clock took decode
-from 9.5 to 12.6 tokens per second with byte-identical output. On a warm
-machine the gaps are short and the hold changes nothing measurable.[^8] It
-is on by default and off under macOS Low Power Mode.
+### 2.2 Tokens per second
 
-Five more ideas were built or replayed on the same days, measured, and left
-off: prefetch on predicted routing where the GPU stalls on the SSD, a decode
-loop that waits on shared events instead of command-buffer round trips, a
-zero-copy read of cached expert pages, per-layer slot allocation at a fixed
-total, and a layer-major prefill schedule. Sections 4 and 5 have the
-numbers.[^9]
+On a warm machine at 128 slots one token costs 40.7 ms.[^17] The routed
+experts' feed-forward takes 6.5 ms, the thirty linear-attention layers 6.1,
+the ten full-attention layers 2.4, the output head 2.4, and the norms and
+router 1.3. Waiting for expert reads takes 7.8 ms. Waiting for the GPU between
+layers takes 9.0. The remaining 5.2 ms is command encoding and time the
+counters do not attribute.
 
-## 3. What is new here, and what is not
+Three of those terms sit at floors this project has measured. The output head
+runs at about 93 percent of the machine's measured 120.4 GB/s memory
+bandwidth, and the full-attention scan at about 90 percent, after a kernel
+that reads each key and value row once per key-value head instead of once per
+query head, 2.49 times faster than the inherited one.[^18] The wait between
+layers is a floor of a different kind. Every layer sends its routing choice
+back to the CPU, which fetches the chosen experts, so every layer ends in a
+command-buffer round trip, the CPU submitting the layer's GPU work and waiting
+for it to finish, of about 207 microseconds regardless of the work inside it,
+and 40 of them make about 8.3 ms.[^19] The routed feed-forward reads about 566
+MB per token, which at the measured bandwidth is a 4.7 ms floor against 6.5
+measured; that 1.8 ms is the largest kernel-level gap left in decode.
 
-Most of slipstream is inherited. The bounded-memory streaming design, the
-per-layer least-frequently-used slot cache, the int4 kernels, the repacker,
-the Mac app, and the server are TurboFieldfare's. The Qwen3.6 port began from
-an upstream pull request.[^10] What this project adds is smaller, and most of
-it is evidence rather than mechanism.
+The terms memory governs are the expert reads and, on a small cache, the GPU
+clock.
 
-**A decode attention kernel that reads each key and value row once per
-key-value head.** The model gives 16 query heads only 2 key-value heads.
-TurboFieldfare's kernel re-read the same rows once per query head. The
-replacement gives one threadgroup to one key-value head and one chunk of the
-sequence, holds each query head's vector in one simdgroup's registers, and
-shares every row it loads across all eight heads. The full-attention branch of
-a decode run fell from 3,106 ms to 1,249 ms, 2.49 times faster, and the
-key-value scan runs at about 90 percent of this machine's measured 120.4 GB/s
-memory bandwidth.[^11] MLX has a read-once kernel of the same design, but not
-for this head dimension: on this head shape MLX's stock kernel measured 57 to
-62 percent of bandwidth in August, and a read-once version written in the
-companion repository, not yet upstream, measured 94 to 98.[^12] Grouped-query
-sharing is not a new idea. Having it in a Swift and Metal streaming runtime,
-gated by reference tests at both production shapes, is what is new.
+### 2.3 What memory buys
 
-**Whole-prompt prefill chunks, and the measurement that justified them.** The
-runtime prefills a prompt in chunks and streams the experts each chunk routes
-to. On a streaming runtime that means every chunk re-reads most of the expert
-pool. Raising the chunk from 128 tokens to the whole prompt cut the bytes read
-during a 2,940-token prefill from 247 GB to 38 GB and the prefill from 63.3 to
-18.5 seconds, with byte-identical output.[^13] The rule that fell out is that
-prefill I/O on this design scales with the number of chunks, not the number of
-tokens, until the chunk covers the prompt.
+![Decode speed against peak memory footprint at the 2,940-token prompt, for slipstream at 16 to 192 slots, TurboFieldfare at 16 and 32, llama.cpp in three configurations, and mlx-lm](docs/assets/decode-by-memory.svg)
 
-**A cache snapshot for a hybrid model.** Thirty of the model's 40 layers use a
-recurrent linear attention whose state cannot be sliced by token, which is
-what makes block-level cache reuse hard on this architecture. slipstream
-snapshots the whole state instead: the key-value cache of the ten
-full-attention layers, the recurrent state and convolution tails of the
-thirty linear layers, and the seed logits, as one 119 MB file for a
-2,940-token prompt. Reload is 588 times faster than recompute, and the same
-benchmark exposed the cold-cache tradeoff above, which the idea's source never
-measured.[^3]
+Read the slipstream curve left to right. It rises from 27.1 tokens per second
+at 2.5 GB to 31.9 at 9.9 GB and falls to 25.2 at 14.2 GB. To its right, the
+runtimes that hold every weight in memory sit at 16 to 22 GB: llama.cpp at
+38.6 and mlx-lm at 41.2, and llama.cpp with its experts on the CPU at 20.8, in
+17.2 GB.
 
-**The memory-versus-speed curve, with its noise stated.** This project has
-found no other published measurement of how a streaming MoE runtime on Apple
-Silicon responds to its cache budget across prompt lengths with a drift
-control on each sweep. The finding that a larger cache can be slower, because
-two caches compete for one pool of memory, came from that measurement and not
-from a model of it.
+The curve has three regions. From 16 to 64 slots each doubling buys 7 percent:
+27.1, 29.1, and 31.1 tokens per second at 2.5, 3.5, and 5.6 GB. From 64 to 128
+the gain flattens to 3 percent, 31.9 at 9.9 GB, because on a machine with 24
+GB the file cache already holds most of what the extra slots would, and the
+misses they remove were being served from memory. At 192 slots, 14.2 GB, the
+speed falls to 25.2. The expert cache and the file cache compete for the same
+memory, and past 128 slots the cache evicts the file pages that were absorbing
+its own misses, so the setting that misses least is among the slowest. The
+optimum belongs to the host, not the model, and will move on a machine with a
+different amount of memory.
 
-**A ported prefill attention kernel for head dimension 256.** The kernel
-gpu-kernel's search produced for this shape now runs the model's ten
-full-attention layers on the M5's tensor units, with the runtime's strides
-and lengths as parameters instead of compiled-in constants. It is a port,
-not a new design; section 5 has what it measured.
+That curve was measured on an otherwise idle machine, where the file cache
+holds part of the expert pool and a miss is a memory copy of about 0.2 ms. On
+the machine slipstream is built for, one that is also running an editor, a
+browser, and the agent that drives the model, the file cache holds little,
+every miss is an SSD read of about 0.36 ms, and the slot count matters
+more.[^20] Two terms appear there that a warm machine hides. The first is the
+GPU clock. Measured at 16 slots with the file cache bypassed, so that every
+expert read came from the SSD, expert reads took 59 ms of each token, and the
+decode kernels took 28 ms instead of the 13 ms they take warm, because the
+chip lowered the GPU clock during each layer's read gap and ran the next
+layer's kernels at the low clock. One group of 32 GPU threads kept looping on
+a second command queue holds the clock up, and decode went from 9.5 to 12.6
+tokens per second with byte-identical output.[^21] The hold is on by default
+and stops under macOS Low Power Mode.
 
-**The GPU clock as a term in the streaming budget.** Section 2 has the
-measurement: on a small cache with cold reads, half of what looked like
-kernel time was the chip running its kernels at a lowered clock between
-reads. No profile of a streaming runtime this project has found reports that
-term, and the fix, one idle threadgroup, is not in any of the runtimes
-compared here.
+The second term is the cache policy. A replacement policy's behavior depends
+only on the sequence of experts each layer requests, so the runtime records
+that sequence, and a script replays it through any policy at any slot count in
+seconds, reproducing the runtime's own miss counters exactly.[^22] On the
+recorded coding session the inherited policy, least frequently used with
+counts kept for the life of the process, held early favorites in memory after
+the work moved on: 98.8 misses per token at 64 slots, a miss being an expert
+the cache does not hold and must read. Halving every expert's count every 32
+tokens, the aging policy, cut that to 71.8. Least recently used gave 77.2, and
+the offline optimum, which knows the future, 39.1. Replayed with every expert
+read from the SSD, the session ran 15 percent faster under the aging policy,
+and on a warm machine 7 percent faster.[^20] It is the default.
 
-**A cache policy chosen by replaying routing traces.** The trace tooling and
-the aging policy of section 2. The method is what is new: the runtime's own
-counters calibrate the replay exactly, so a policy question is answered in
-seconds instead of a night, and the replay showed which policies not to
-build.
+Put together: on the machine slipstream is built for, a small cache runs the
+SSD near its limit with the GPU at a held clock, and a larger cache converts
+SSD reads into hits until it begins to evict the file cache. Time to first
+token is the same at every setting short of that last one.
 
-**Eight priced negative results.** Each was built or replayed, measured, and
-left off. They are in sections 2, 4, and 5.
+## 3. Running it
 
-**A speculative-decoding scaffold whose measurement located the block.** It
-drafts, verifies, and repairs the recurrent state correctly, and it is slower
-than plain decode. The measurement says why, and the reason was not the one
-the design assumed. Section 4 has the numbers.
-
-None of these is a new algorithm. Grouped-query sharing, whole-prompt prefill,
-state snapshots, and speculative decoding all exist elsewhere. The claim this
-project makes is narrower: on this class of machine, for this class of model,
-these are the measured effects, including the ones that went the wrong way.
-
-## 4. Where a token's time goes
-
-Measured at 128 slots on a 3k prompt, one token costs 40.7 ms.[^14] Of that,
-9.0 ms is spent waiting for the GPU between layers, 7.8 ms awaiting expert
-reads, 6.5 ms in the routed expert feed-forward, 6.1 ms in the thirty
-linear-attention layers, 2.4 ms in the ten full-attention layers, 2.4 ms in
-the output head, and 1.3 ms in norms and the router. Those sum to 35.5 ms; the
-remaining 5.2 ms is command encoding and time the counters do not attribute.
-
-**The wait between layers is a floor.** Every layer sends its routing choice
-back to the CPU, which then fetches the chosen experts, so every layer ends in
-a command-buffer round trip. That round trip costs about 207 microseconds on
-this machine regardless of the work inside it, and there are 40 of them per
-token, about 8.3 ms.[^15] Replacing the wait with a GPU fence and a CPU spin
-produced bit-identical output and ran 15 percent slower, because the GPU's
-writes become visible to the CPU at about the same boundary anyway.[^16] A
-later probe inverted the dependency with shared events, one command buffer
-per token with the GPU waiting for the CPU's signal at each layer: a wait the
-CPU has already satisfied costs the GPU nothing, but a parked GPU restarts in
-100 to 190 microseconds, as much as the commit it would replace, so only
-layers with no expert misses could gain.[^9] MLX avoids the cost by keeping
-routing indices on the GPU, which a runtime that fetches from disk on the CPU
-cannot do.
-
-**Prefetching on predicted routing does not pay, and the obvious objection was
-tested.** Running the next layer's router against the current layer's state
-picks about 82 percent of the experts that layer will want. Prefetching on
-that prediction cut the measured disk wait from 15.95 to 7.01 ms per token at
-16 slots and made decode 11.2 percent slower.[^17] The runtime already commits
-GPU work before it issues the fetch, so the counter measures an overlapped
-wait rather than a stall, and moving the same bytes earlier only crowds a
-saturated bus. That left one untested case, the GPU stalling on the SSD for
-real, and it was tested on 2026-09-06 at 64 slots with every expert read
-from disk: one layer of lead tied, 22.6 against 22.7 tokens per second, and
-two layers of lead lost 10 percent, because the wrong guesses cost 37 percent
-more bytes on a device with no room for them.[^18] On the recorded coding
-session the same prefetch ran 6 percent slower than none. It ships off by
-default, and it is closed in this design.
-
-**Merging command buffers is worth less than the noise.** Removing 41 of the
-per-token synchronization boundaries was bit-identical and under 2 percent.[^19]
-
-**The output head and the attention scan are near their bandwidth ceilings.**
-The head reads about 270 MB of weights per token at about 93 percent of the
-measured bandwidth, and the attention scan at about 90 percent, so there is no
-kernel prize left in either.[^11] The routed expert feed-forward reads about
-566 MB per token, which at the measured bandwidth is a 4.7 ms floor against
-6.5 ms measured, about 72 percent by arithmetic; the remaining 1.8 ms per
-token is the largest kernel-level gap in decode.
-
-**Speculative decoding is the only large lever left, and it is not yet a
-win.** The scaffold drafts by prompt lookup, verifies by running the draft
-through a batched forward, and repairs the recurrent state on rejection. On
-code it accepts 33.9 percent of drafted tokens for 3.57 emitted tokens per
-round, and it still decodes slower than the sequential path, 16.9 against
-27.7 tokens per second.[^20] The cost is not acceptance. A verify round costs
-178 ms against a 47 ms target, because the batched matrix kernels available
-here read the weights once per row below 32 rows, so verifying nine tokens
-costs about nine GEMVs. Expert traffic also scales with verified tokens, not
-emitted ones, although the eight experts each drafted token routes to overlap
-55 percent within a round. A multi-row int4 kernel that reads weights once
-now serves the projections and the head; on a code continuation at 128 slots
-it took speculative decode from 16.9 to 22.3 tokens per second against 28.6
-sequential, with byte-identical output.[^21] The routed experts and the
-linear-attention projection still run per token, and they are the rest of
-the round.
-
-## 5. Where prefill time goes
-
-Until 2026-09-04 the time to first token grew faster than the prompt. Timing
-each 4096-token chunk of the 11,738-token prompt gave 26.3, 42.8, and 53.3
-seconds for chunks that see 4,096, 8,192, and 11,736 keys.[^22] A fit put the
-cost at 4.4 ms per token plus about 1 microsecond per token-key pair. The
-second term was attention: 55 percent of the 12k prefill and about 73 percent
-of the 24k one. The cause was a kernel-selection gap. Qwen's full-attention
-layers have a head dimension of 256, the tensor-unit prefill attention kernel
-inherited from upstream accepted only Gemma's 512-wide shape, and Qwen fell
-to a scalar fallback that gave one threadgroup to each query token per head,
-ran two threadgroup barriers per key, and re-read the keys and values once
-for each of the 16 heads, at about one percent of the tensor unit's ceiling.
-
-The kernel that closed the gap is a port of gpu-kernel's prefill-attention
-champion: 32-query by 128-key tiles, both matrix products on the tensor units,
-a grid ordered so the eight query heads that share a key-value head walk the
-keys together, and final tiles that overlap instead of reading past the end.
-The same probe, same prompt, same machine, after the port:
-
-| chunk | tokens | keys visible at end | before | after |
-| --- | --- | --- | --- | --- |
-| 1 | 4096 | 4096 | 26.3 s | 18.3 s |
-| 2 | 4096 | 8192 | 42.8 s | 18.1 s |
-| 3 | 3544 | 11736 | 53.3 s | 16.1 s |
-
-The per-token cost no longer grows with position. At 24k the six chunks took
-between 16 and 19 seconds each, 108.9 seconds in all against 381.7 before.
-The harness then measured time to first token at the two cache sizes that
-matter, in the same round-robin protocol as section 2:[^23]
-
-| slots | 3k before | 3k after | 12k before | 12k after | 24k before | 24k after |
-| --- | --- | --- | --- | --- | --- | --- |
-| 16 | 17.4 s | 14.5 s | 116.9 s | 53.8 s | 381.7 s | 112.2 s |
-| 64 | 17.4 s | 15.2 s | 117.0 s | 54.5 s | 381.8 s | 112.7 s |
-
-Two caveats on the "after" column. The September sweep ran on a busy machine,
-with a load average between 5 and 9 and Spotlight indexing, where the August
-sweep ran overnight on an idle one. Its decode rates read about 30 percent
-below August at every cell, and a same-session interleaved A/B put the
-pre-port binary at the same depressed rate, 20.3 and 18.5 tokens per second
-against the new binary's 20.0 and 20.0, so the drop is the machine and not
-the change; those decode figures are not quoted.[^24] The pre-port binary also
-prefilled the 3k prompt in 18.4 and 19.0 seconds that day against 17.4 in
-August, so the "after" times carry a few percent of the same load and are
-pessimistic. The overnight sweep of 2026-09-06 replaced those tables; section
-2 carries it, and its 3k time at 64 slots is 14.3 seconds.
-
-What remains is the linear term, about 4.5 ms per token at every length. The
-expert stream is not it. Above 4,096 tokens prefill re-reads the expert pool
-once per chunk, about 18 GB each, and reading that from the SSD instead of
-from memory changed prefill by under one percent: 54.3 seconds at 12k and
-112.6 at 24k with every expert read cold, against 53.9 and 112.4 warm.[^18]
-The stream is hidden behind compute, and a layer-major schedule that read the
-pool once would save nothing. The term is GPU work and the synchronization
-around it: 1,280 expert tiles per 4,096-token chunk, each a command-buffer
-round trip, the linear-attention recurrence over the chunk's rows, and the
-projections. Their shares are not yet attributed, and timing each dispatch is
-the next step.
-
-## 6. Which engine to run
-
-The field for this model on a Mac is three engine families.
-[llama.cpp](https://github.com/ggml-org/llama.cpp) runs GGUF files;
-[Ollama](https://ollama.com) and [LM Studio](https://lmstudio.ai) wrap it.
-[MLX](https://github.com/ml-explore/mlx) is Apple's framework; mlx-lm is its
-reference library, and oMLX is a server built on it with its own kernels,
-speculative decoding from a multi-token-prediction head, and a
-content-addressed cache that persists to SSD. Expert streaming keeps weights
-on the SSD and fetches what each token routes to: TurboFieldfare,
-[NVMAI](https://github.com/Pummelchen/NVMAI), and slipstream. Runtimes that
-require every weight resident, or have no Apple Silicon build, were ruled out
-for this machine.
-
-Take mlx-lm, or LM Studio's MLX engine over it, for speed paid for in memory:
-41.2 tokens per second at 21.6 GB, which leaves nothing for a longer context
-or a second program. oMLX's own single-stream additions are large on other
-machines, 85 to 140 tokens per second on this model on an M3 Ultra by its
-authors' measurement, but no number exists for it on an M5, and several of
-its Qwen fast paths are disabled there.[^25] Take llama.cpp, or Ollama over
-it, for the widest model and quantization choice, and note its two
-configurations: resident by default at 16 GB, or expert tensors paged from
-the SSD once both `--n-cpu-moe` and `--no-mmap` are set, at which point the
-table shows it decoding at 20.8 tokens per second against 38.6 resident, in
-the same 17 GB. Take a streaming runtime when memory binds, which on a laptop
-that is also doing other work is the common case.
-
-<a id="command-line-interface"></a>
-
-## 7. Using it
-
-The requirements are macOS 26 with Metal 4 and Swift 6.2 or newer; the tree
-builds on Swift 6.3. Build the products, then repack the pinned Qwen3.6
-checkpoint into the runtime's page-aligned expert layout. The install is about
-19.6 GB on disk, and the installer streams byte ranges rather than downloading
-a full snapshot.
+The requirements are macOS 26 with Metal 4 and Swift 6.2 or newer. Build the
+products, then repack the pinned Qwen3.6 checkpoint into the runtime's
+page-aligned expert layout; the repacker fetches byte ranges from Hugging Face
+rather than a whole snapshot, and the result takes about 19.6 GB on disk.
 
 ```bash
 swift build -c release
@@ -425,9 +288,10 @@ swift build -c release
 .build/release/slipstream-repack --model qwen36 --output ~/models/qwen36.gturbo
 ```
 
-Generate from the command line. The default cache is 64 slots and the default
-prefill chunk covers the whole prompt. Add `--kv-snapshot <path>` to save the
-cache after a fresh prefill and reuse it on the next identical prompt.
+Generate from the command line. `--expert-cache-slots` sets how many experts
+per layer stay in memory, `--kv-snapshot <path>` saves the cache after a fresh
+prefill and restores it on the next identical prompt, and `--gpu-clock-hold`
+and `--expert-cache-policy` expose the two decode terms of section 2.3.
 
 ```bash
 .build/release/slipstream --model ~/models/qwen36.gturbo --prompt "The capital of France is" --max-new 64
@@ -435,211 +299,276 @@ cache after a fresh prefill and reuse it on the next identical prompt.
 
 Serve on the loopback interface. The server speaks the OpenAI chat-completions
 API and the Anthropic messages API, serves a chat page at its root, keeps one
-conversation's cache prefix in memory, and cancels generation when the client
-disconnects. Coding agents run against it: `Scripts/claude-local.sh` points
-Claude Code at a local server.
+conversation's prefix in memory, and cancels generation when the client
+disconnects. `Scripts/claude-local.sh` points Claude Code at it.
 
 ```bash
 .build/release/slipstream-server --model ~/models/qwen36.gturbo --port 8091 --max-context 65536
 ```
 
-The server binds to `127.0.0.1` with no authentication. Do not expose it.
-Only one model process should run at a time; a second one contaminates every
-measurement and competes for the same memory. `Scripts/test.sh` runs the
-serial test suite, 587 tests at the time of writing.
+The server binds to `127.0.0.1` with no authentication; do not expose it. Run
+one model process at a time, because a second one competes for the same memory
+and contaminates every measurement. `Scripts/test.sh` runs the serial test
+suite, 670 tests at the time of writing.
 
-## 8. Lineage and attribution
+## 4. Measured and left out
 
-- Runtime core: forked from
-  [TurboFieldfare](https://github.com/drumih/turbo-fieldfare) (Apache 2.0),
-  full git history preserved. The bounded-memory expert streaming design is
-  theirs, and so are the repacker, the app, and most of the kernels.
-- Qwen3.6 support started from TurboFieldfare
-  [pull request 29](https://github.com/drumih/turbo-fieldfare/pull/29).
-- Ideas credited to [oMLX](https://github.com/jundot/omlx) (Apache 2.0):
-  content-addressed cache blocks that persist to the SSD, memory enforcement
-  on the process footprint that macOS actually kills on, and shipping
-  tensor-unit kernels as a second Metal library gated on the SDK. Ideas, not
-  code. The footprint guard is built here; the block-aligned cache is not.
-- Kernels and measurement method come from
-  [gpu-kernel](https://github.com/dwijenpatel/gpu-kernel), a companion
-  research repository. Its methodology document records how each measurement
-  technique was found wrong and what the error cost, which is why the numbers
-  above carry the caveats they do.
+Each of these was built or replayed, measured on this machine, and kept out of
+the default configuration. The numbers say why.
 
-This page describes commit `5b5a6d7` and measurements taken between
-2026-08-06 and 2026-09-06.
+**Speculative decoding.** The scaffold drafts by prompt lookup, guessing the
+next tokens from earlier repeats in the text, verifies a round of up to eight
+tokens in one forward pass, and repairs the linear-attention state when a
+draft is rejected. On a code continuation it accepts 41.6 percent of drafted
+tokens for 3.91 emitted tokens per round, and it decodes at 22.3 tokens per
+second against 28.6 sequential at 128 slots, and 17.0 against 27.3 at 64,
+where the experts a round's tokens need between them, 32 per layer, thrash the
+cache.[^23] The cost is not acceptance. Below 32 rows every batched matrix
+kernel available here costs about one weight read per row, so verifying eight
+tokens re-read the weights eight times. A multi-row 4-bit kernel that reads
+each weight row once now serves the projections and the head and took the
+verify round from 178 to 137 ms; running a round's experts as one grouped GPU
+dispatch per layer gained 2 to 3 percent; and the remaining cost is the
+linear-attention recurrence, which walks the round's rows one at a time. It
+stays off until a round costs near 1.3 decode tokens.
 
-[^1]: Architecture facts from the
-    [model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B): 40 layers, of
-    which 30 are gated-delta-net linear attention and 10 are full attention
-    with 16 query heads, 2 key-value heads, and head dimension 256; 256 routed
-    experts per layer with 8 active per token. The 18 GB figure is the packed
-    expert files of the 4-bit checkpoint as installed here, 1,769,472 bytes
-    per expert per layer.
+**Prefetch on predicted routing.** Applying the next layer's router to the
+current layer's state picks 79.7 percent of the experts that layer will want,
+and 72.8 percent two layers ahead.[^24] On a warm machine at 16 slots,
+prefetching on that guess cut the measured disk wait from 15.95 to 7.01 ms per
+token and made decode 11 percent slower, because the runtime already overlaps
+the wait with GPU work and the early reads crowd a saturated memory bus. With
+every expert read from the SSD at 64 slots, prefetching one layer ahead tied,
+22.6 against 22.7 tokens per second, and two layers ahead lost 10 percent,
+because the wrong guesses cost 37 percent more bytes one layer ahead and 47
+percent two ahead, on an SSD with no room for them. On the coding session the
+same prefetch ran 6 percent slower than none.
 
-[^2]: slipstream rows: `playbook/fill_table.sh --only slipstream` at commit
-    `03d5a06`, 2026-09-06 04:00 to 04:37, results in
-    `bench-results/table-20260906-035959/results.csv`; drift control
-    `DRIFT-slipstream-slots16`, 28.487 against 28.259 tokens per second at
-    1k, 0.8 percent. The 12k and 24k cells at 96, 128, and 192 slots are
-    blank: the overnight sweep refused those prompts through a defect in the
-    prefill memory guard, which extrapolated the first chunk's one-time
-    growth, the expert slots becoming resident, as a per-chunk rate (fixed in
-    commit `5b5a6d7`), and an afternoon rerun on a machine in use,
-    `bench-results/table-20260906-140627`, failed its own drift control by
-    19.5 percent and is not reported. They wait for the next idle window.
-    TurboFieldfare rows:
-    `bench-results/table-20260806-044148`; llama.cpp rows:
-    `bench-results/table-20260806-055113`; both 2026-08-06, same harness,
-    same prompt files, with TurboFieldfare built from its own tree at its
-    defaults. The August slipstream sweep those rows were first compared
-    against is `bench-results/table-20260806-022221`.
+**Removing the per-layer round trip.** Replacing the command-buffer wait with
+a GPU fence and a CPU spin was bit-identical and 15 percent slower, because
+the GPU's writes become visible to the CPU at about the same boundary
+anyway.[^25] Inverting the dependency with shared events, one command buffer
+per token with the GPU waiting for the CPU's signal at each layer, costs
+nothing when the CPU has already signaled, but a parked GPU restarts in 100 to
+190 microseconds, as much as the 197-microsecond commit it would replace.
+Merging 41 of the per-token synchronization boundaries changed decode by under
+2 percent.
 
-[^3]: Commit `bb06e5d`, 2026-08-01: prefill 17.65 seconds to 0.03 seconds on
-    reload, 588 times, outputs byte-identical to a no-snapshot run at a fixed
-    seed; decode after restore 25.3 to 13.5 tokens per second over the first
-    256 tokens. The snapshot feature is on the command-line interface
-    (`--kv-snapshot`); the server keeps one prefix in memory and does not
-    persist it.
+**Reading the expert pool once per prompt.** A layer-major prefill schedule
+would read the pool once for the whole prompt instead of once per chunk.
+Section 2.1 measured the stream it would remove at under one percent of
+prefill time.
 
-[^4]: `llama-bench` measures prompt processing and generation as separate
-    timed loops; the time to first token in the table is prompt tokens
-    divided by its prompt-processing rate. Model file
+**Other cache policies.** Replayed on the same routing traces at 64 slots, six
+published policies, least recently used, ARC, LRFU, a windowed TinyLFU shape,
+S3-FIFO, and SIEVE, left between 72.1 and 77.2 misses per token against
+aging's 71.8, and LRFU at its best decay landed on the same number, so
+periodic halving sits at the recency-frequency optimum for this workload.[^26]
+Per-layer slot allocation at a fixed total, trained on one trace and scored on
+the other, moved misses by under 0.3 percent in both directions. A predictor
+built from each layer's own token-to-token transitions covered 5 percent of
+misses at 64 slots for about 1 ms of bookkeeping per token, and was not built.
+
+**A staged-activation expert kernel.** A fork of TurboFieldfare reported the
+first phase of its expert kernel at 56 percent of peak, up from 38, by staging
+the shared activation in the GPU's on-chip shared memory, on an M3. On the M5
+the same variant measured 25.3 and 26.0 tokens per second against 25.9 and
+25.3 unstaged, inside the spread of a pair, and stays behind a switch.[^27]
+
+**Read-ahead advice.** Read-ahead advice on the expert files, in three
+variants, measured neutral or negative on this host and is off.[^28]
+
+[^1]: Architecture facts from the [model
+    card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B): 40 layers, of which 30
+    are gated-delta-net linear attention and 10 are full attention with 16
+    query heads, 2 key-value heads, and head dimension 256; 256 routed experts
+    per layer with 8 active per token. The 18 GB is the packed expert files of
+    the 4-bit checkpoint as installed here, 1,769,472 bytes per expert per
+    layer, 18.14 GB in all.
+
+[^2]: The range is the two runtimes in the tables of section 1 that hold every
+    weight in memory: llama.cpp at 16.2 GB of resident set size with `mmap` on
+    and 17.2 GB of peak footprint with it off, and mlx-lm at a 21.6 GB peak,
+    which exceeds this machine's 21.3 GB wired limit.
+
+[^3]: slipstream rows: `playbook/fill_table.sh --only slipstream` at commit
+    `03d5a06`, 2026-09-06 04:00 to 04:37,
+    `bench-results/table-20260906-035959/results.csv`; drift check 28.487
+    against 28.259 tokens per second at the 1k prompt, 0.8 percent.
+    TurboFieldfare rows: `bench-results/table-20260806-044148`; llama.cpp
+    rows: `bench-results/table-20260806-055113`; both 2026-08-06 on the same
+    harness and prompt files, and neither run carried a drift check of its
+    own. The three charts are generated from these files by
+    `playbook/readme_figures.py`, which holds the numbers inline because
+    `bench-results` is not in the repository.
+
+[^4]: Computed from the architecture, not measured: the ten full-attention
+    layers append 2 key-value heads of 256 values each for keys and for
+    values, in 16-bit floats, per token, 20 KB, so 32,768 tokens hold 671 MB.
+    The measured footprint at 16 slots grew from 2.07 GB at the 889-token
+    prompt to 2.45 GB at 23,827 tokens, 0.38 GB for 22,938 more tokens,
+    against 0.47 GB computed.
+
+[^5]: slipstream is a fork of TurboFieldfare (Apache 2.0) with its history
+    preserved. The bounded-memory streaming design, the repacker, the Mac app,
+    the server, and most of the kernels are TurboFieldfare's. The Qwen3.6 port
+    began from its [pull request
+    29](https://github.com/drumih/turbo-fieldfare/pull/29), and this project's
+    prefill-chunk change is offered back as [pull request
+    53](https://github.com/drumih/turbo-fieldfare/pull/53); both were open as
+    of 2026-09-04.
+
+[^6]: Ideas, not code. oMLX (Apache 2.0) persists content-addressed cache
+    blocks to the SSD and enforces memory on the process footprint that macOS
+    kills on. The footprint guard is built here: before each prefill chunk the
+    runtime reads its physical footprint and refuses the chunk when the
+    footprint plus a predicted growth would exceed 90 percent of the GPU's
+    working-set limit, where the same prompt without the guard ends in the
+    process being killed. The block-aligned cache is not built; this project
+    snapshots the whole state instead.
+
+[^7]: gpu-kernel's methodology document records how each of its measurement
+    techniques was found wrong and what the error cost. Its measured sustained
+    read bandwidth on this machine is 120.4 GB/s against a 153 GB/s
+    specification, and every bandwidth ratio on this page is against the
+    measured figure.
+
+[^8]: `playbook/fill_table.sh`; its header records the swing that set the
+    rules, the same configuration at 22.15 tokens per second early in a
+    session and 25.27 late, and the ordered variant with warm-up runs per
+    entry that still drifted 24 percent on 2026-08-06.
+
+[^9]: `llama-bench` measures prompt processing and generation as separate
+    timed loops; the time to first token in the table is prompt tokens divided
+    by its prompt-processing rate. Model file
     `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf`.
 
-[^5]: `playbook/mlx_lm_bench.py`, commit `33b863e`, 2026-08-05: 41.2 tokens
-    per second at a 21.6 GB peak, `mlx-community/Qwen3.6-35B-A3B-4bit`, same
-    3k prompt file, greedy. The first run took about 150 seconds to first
-    token because it also materialized the mapped weights; that number is
-    not prefill and is not in the table.
+[^10]: `playbook/mlx_lm_bench.py`, commit `33b863e`, 2026-08-05: 41.2 tokens
+    per second at a 21.6 GB peak, `mlx-community/Qwen3.6-35B-A3B-4bit`, the
+    same 3k prompt file, temperature 0. The first run took about 150 seconds
+    to first token because it also materialized the mapped weights; that
+    number is not prefill and is not in the table.
 
-[^6]: `bench-results/table-20260806-164925/results.csv`, commit `5693167`,
-    three round-robin passes at the 3k prompt, 512 generated tokens: 25.116
-    tokens per second at 16 slots, 26.636 at 32, 27.763 at 64, 25.974 at 96,
-    25.929 at 128, 17.859 at 192; drift control 24.567 against 25.116, 2.2
-    percent. Hit rates 78.7 percent at 64 slots and 97.7 percent at 192 from
-    the runtime's own counters. An earlier figure of 27 percent for 16 to 128
-    slots was measured without the page-cache leveling and is retracted.
+[^11]: The guard extrapolated the first chunk's one-time growth, the expert
+    slots filling, as a per-chunk rate, and refused the 12k and 24k
+    prompts at 96 slots and above; fixed in commit `5b5a6d7`. The rerun of
+    2026-09-06 14:06, `bench-results/table-20260906-140627`, ran on a machine
+    in use and its drift check read 19.5 percent apart, so it is not reported.
+    The entries wait for `playbook/fill_table.sh --only 'slipstream,
+    (96|128|192) of' --contexts 12k,24k` on an idle machine.
 
-[^7]: Traces recorded with `TURBO_FIELDFARE_ROUTE_TRACE` and replayed with
-    `playbook/route_replay.py`; the traces, the recorded session, and its
-    server logs are in `bench-results/route-replay-20260905`, and the policy
-    tables in `docs/REVIEW-2026-09-04.md`. The replay reproduces the
-    runtime's own miss counter exactly on a single run, 31,903 at 64 slots
-    on the 3k prompt, and within 0.2 percent over the ten-request session.
-    The session times are `bench-results/overnight-20260906-022111/SUMMARY.md`:
-    with every expert read from the SSD, LFU 1,157.6 s, LRU 1,020.8 s, aging
-    984.6 s; warm, aging 788.4 s against LFU's 849.5 s and LRU's 929.7 s on
-    earlier nights. All ten replies were byte-identical across policies.
-
-[^8]: `bench-results/gpu-heater-20260905`: five alternated runs at 16 slots
-    with the file cache bypassed and physical reads equal to logical, 3k
-    prompt, 512 tokens; control 9.71 and 9.47 tokens per second, heater
-    12.61, 12.59, and 12.65, kernel time 27.6 to 29.0 ms per token against
-    12.7 to 12.8. The built-in hold in the same setup: off 9.59 and 9.32,
-    auto 12.72 and 12.82. Warm at 64 slots, 2026-09-06: off 25.9 and 26.2,
-    auto 27.5 and one run at 19.9 whose expert-read bucket alone doubled
-    (`overnight-20260906-022111`, rows p6).
-
-[^9]: `docs/REVIEW-2026-09-04.md`, addenda of 2026-09-05 and 2026-09-06:
-    the shared-event probe (`bench-results/probes-20260905/evprobe*.swift`,
-    medians over 300 trials: commit-and-wait 197 µs, a satisfied GPU wait
-    1 µs, a parked GPU restarting in 100 to 190 µs), the zero-copy analysis
-    (`misscost*.c` and `wrapcost.swift` in the same directory), and the
-    per-layer allocation replay, which changed misses by under 0.3 percent
-    in both holdout directions.
-
-[^10]: [TurboFieldfare pull request 29](https://github.com/drumih/turbo-fieldfare/pull/29),
-    open as of 2026-09-04. This project's own upstream contribution, the
-    configurable prefill chunk, is
-    [pull request 53](https://github.com/drumih/turbo-fieldfare/pull/53), also
-    open.
-
-[^11]: Commit `a638cf8`, 2026-08-01, with long-sequence reference tests at
-    both production shapes. Timings and bandwidth ratios are from the
-    runtime's per-phase GPU counters and the companion repository's
-    measurement log; the 120.4 GB/s ceiling is that repository's measured
-    sustained read bandwidth on this machine, against a 153 GB/s
-    specification. The context length at which the 90 and 93 percent figures
-    were taken is not recorded, and figures measured on a working set that
-    fits the system cache read high; treat both as approximate.
-
-[^12]: gpu-kernel, `mlx-kernel-a-evidence.md` and `telemetry/kernel_a_ab.csv`,
-    2026-08-27: MLX's stock decode kernel at head dimension 256 and a
-    query-to-key-value ratio of 8 measured 57 to 62 percent of the 120.4 GB/s
-    ceiling at a 32k key-value length; the read-once kernel written there
-    measured 94 to 98 percent, 1.71 times faster, in three alternating pairs
-    on an idle machine.
+[^12]: Commit `bb06e5d`, 2026-08-01: prefill 17.65 seconds to 0.03 seconds on
+    reload, outputs byte-identical to a run without the snapshot at a fixed
+    seed; decode after restore 25.3 to 13.5 tokens per second over the first
+    256 tokens. The feature is `--kv-snapshot` on the command-line tool; the
+    server keeps one prefix in memory and does not persist it.
 
 [^13]: Commit `c0d3f28`, 2026-08-01, measured with `iostat` and `time -l` on
-    the community long-synthesis prompt: bytes read 247 GB to 38 GB, prefill
-    63.3 to 18.5 seconds, wall 81.1 to 37.6 seconds, token-identical output.
+    the 2,940-token prompt: bytes read 247 GB to 38 GB, prefill 63.3 to 18.5
+    seconds, token-identical output.
 
-[^14]: `profiles/qwen36/README.md`, from the runtime's phase counters under
-    `TURBO_FIELDFARE_PHASES=1`, 2026-08-01, 128 slots, warm, 3k context. The
-    full-attention figure is the post-rewrite one; the pre-rewrite figure was
-    6.1 ms.
+[^14]: `bench-results/overnight-20260906-022111/SUMMARY.md`, rows p4 and p7:
+    after the file cache was emptied, with the cache bypassed and 0.1 percent
+    of the expert pool in the file cache before and after each run, prefill only, 64
+    slots: 12k 54.28 and 54.36 seconds cold against 53.91 warm; 24k 112.68 and
+    112.56 against 112.42.
 
-[^15]: gpu-kernel `METHODOLOGY.md`: a Metal commit-and-wait round trip costs
-    about 207 microseconds on this machine regardless of kernel size, measured
-    with a standalone 40-line binary; about 15 microseconds when empty and
-    about 38 when eight are pipelined.
+[^15]: Chunk timings from a build of commit `01f7d5e` that prints a timestamp
+    at each chunk boundary, 2026-09-04, on the 11,738-token prompt file in a
+    fresh process; a fit to the three chunks gave 4.4 ms per token plus about
+    1 microsecond per token-key pair, and attention at 12k ran at 0.17 TFLOPS
+    against the tensor unit's measured 15.4. The port is commit `f788865`. The
+    "before" times to first token are the slipstream run of 2026-08-06,
+    `bench-results/table-20260806-022221`, whose drift check read 8.4 percent;
+    time to first token is far less sensitive to file-cache state than decode,
+    and the change it is compared against is a factor of two to three.
 
-[^16]: Commit `0c3358f`, 2026-08-01: 26.8 to 22.8 tokens per second with the
-    fence-and-spin wait, bit-identical output.
+[^16]: 192 slots at 12k: 145.5 seconds against 116.9 at 16 slots in the run of
+    2026-08-06 (drift check 8.4 percent), and 88 seconds against 53 in the
+    rerun of 2026-09-06 14:06 (drift check 19.5 percent). The 24k prompt in
+    August read 475 against 382. Decode fell in the same entries, to 12.4 and
+    12.1 tokens per second in August.
 
-[^17]: Commit `0358b9f`, 2026-08-06, at 16 slots: routing recall 82.5
-    percent, disk wait 15.95 to 7.01 ms per token, throughput 40.4 to 45.5 ms
-    per token. The first test, at 128 slots, is commit `03e83fb`.
+[^17]: `profiles/qwen36/README.md`, from the runtime's phase counters under
+    `TURBO_FIELDFARE_PHASES=1`, 2026-08-01, 128 slots, warm, the 2,940-token
+    prompt.
 
-[^18]: `bench-results/overnight-20260906-022111/SUMMARY.md`, one purge, then
-    every arm with the file cache bypassed and 0.1 percent of the expert
-    pool resident before and after. Rows p1: prefetch off 22.67 and 22.62
-    tokens per second, one layer of lead 22.55 and 21.95, two layers 21.66
-    and 19.06; bytes read per token 110, 151, and 162 MB. Row p3: the
-    session under prefetch 1,046.3 s against 984.6 s without. Rows p4 and
-    p7: prefill only, 12k 54.28 and 54.36 s cold against 53.91 warm, 24k
-    112.68 and 112.56 against 112.42.
+[^18]: Commit `a638cf8`, 2026-08-01, with long-sequence reference tests at
+    both production shapes: the full-attention branch of a decode run 3,106 ms
+    to 1,249 ms. Bandwidth ratios are from the runtime's per-phase GPU
+    counters against gpu-kernel's measured 120.4 GB/s; the context length at
+    which they were taken is not recorded, and figures measured on a working
+    set that fits the system cache read high, so treat both as approximate.
 
-[^19]: Commit `4249aa3`, 2026-08-04.
+[^19]: gpu-kernel's methodology document: a Metal commit-and-wait round trip
+    costs about 207 microseconds on this machine regardless of kernel size,
+    measured with a standalone binary.
 
-[^20]: `docs/SPEC_DECODE.md`, 2026-08-05, code-domain probe at 128 slots:
-    111 rounds, 33.9 percent acceptance, 3.57 emitted tokens per round,
-    verify 178 ms per round. The kernel pricing that follows is recorded in
-    the same document and in the companion repository's log of 2026-08-06.
+[^20]: `bench-results/overnight-20260906-022111/SUMMARY.md`, rows p2 and p5:
+    the session with every expert read from the SSD, 64 slots, least
+    frequently used 1,157.6 seconds, least recently used 1,020.8, aging 984.6;
+    warm, aging 788.4 against least frequently used at 849.5 and least
+    recently used at 929.7 on earlier nights. All ten replies were
+    byte-identical across policies. Per-miss costs are from the first turn of
+    the session under each policy on a host holding about 7 GB of file cache,
+    `docs/REVIEW-2026-09-04.md`: 0.20 to 0.22 ms per miss under least
+    frequently used, whose leftover misses the file cache served, and 0.32 to
+    0.34 under least recently used, whose leftover misses reached the SSD;
+    with the file cache bypassed a miss is about 0.36 ms.
 
-[^21]: `docs/SPEC_DECODE.md`, section "M2' v2, first kernel", 2026-09-04:
-    raw code continuation, 512 tokens, greedy, page cache leveled, 128
-    slots; acceptance 41.6 percent, 3.91 emitted per round, verify 137 ms
-    per round, down from 178. At 64 slots the round's union of experts
-    thrashes the cache and the speculative rate is 17.0.
+[^21]: `bench-results/gpu-heater-20260905`: five alternated runs at 16 slots
+    with the file cache bypassed and physical reads equal to logical reads, 3k
+    prompt, 512 tokens; control 9.71 and 9.47 tokens per second, with the hold
+    12.61, 12.59, and 12.65; kernel time 27.6 to 29.0 ms per token against
+    12.7 to 12.8. The built-in hold in the same setup: off 9.59 and 9.32, on
+    12.72 and 12.82. Warm at 64 slots, 2026-09-06: off 25.9 and 26.2, on 27.5
+    and one run at 19.9 whose expert-read time alone doubled
+    (`overnight-20260906-022111`, rows p6). Its energy cost is not measured.
 
-[^22]: Measured 2026-09-04 with a build of commit `01f7d5e` that prints a
-    timestamp at each prefill chunk boundary, on the same 11,738-token prompt
-    file the tables use, in a fresh process with no other model process
-    running. The fit predicts the third chunk at 50.4 seconds against 53.3
-    measured. Attention FLOPs at 12k are 11.3 TFLOP, which over the fitted
-    67.8 seconds is 0.17 TFLOPS against the tensor unit's measured 15.4.
+[^22]: Traces recorded with `TURBO_FIELDFARE_ROUTE_TRACE` and replayed by
+    `playbook/route_replay.py`; traces, the recorded session, and its server
+    logs are in `bench-results/route-replay-20260905`. The replay reproduced
+    the runtime's own decode miss count exactly on a single 3k run, 31,903 at
+    64 slots, and within 0.2 percent over the ten-request session. The session
+    is a coding task through the server, a rate-limited webhook relay taken
+    from design note to README, 20,600 traced tokens of which 18,772 are
+    decode, with the model's reasoning included.
 
-[^23]: `playbook/fill_table.sh --only 'slipstream, (16|64) of' --contexts
-    3k,12k,24k` at commit `1c99256`, 2026-09-04 14:07 to 14:26, results in
-    `bench-results/table-20260904-140715/results.csv`. Two round-robin
-    passes, the second recorded; drift control 18.508 against 18.152
-    tokens per second at 3k, 2.0 percent. The "before" column is the
-    2026-08-06 sweep of section 2.
+[^23]: `docs/SPEC_DECODE.md`, 2026-09-04: raw code continuation, 512 tokens,
+    temperature 0, file cache warm, outputs byte-identical between the
+    sequential and speculative paths; at 128 slots verify 137 ms per round
+    from 178 and the head 8.8 ms from 18; the grouped expert dispatch 20.6 and
+    20.1 against 20.3 and 19.7 tokens per second at 64 slots and 22.2 and 22.7
+    against 22.7 at 128. On the chat form of the same prompt the model
+    reasoned in prose and acceptance fell to 22 percent.
 
-[^24]: Fresh-process runs alternating the binary of commit `1bd6b3e` and the
-    binary of commit `1c99256`, 3k prompt, 64 slots, 512 tokens, greedy,
-    2026-09-04 14:35: old 19.00 s and 20.263 tokens per second, new 14.70 s
-    and 19.989, old 18.40 s and 18.457, new 15.03 s and 19.978. Load
-    averages during the runs were 4.9 to 9.4.
+[^24]: Recall by lookahead distance from
+    `TURBO_FIELDFARE_PRED_ROUTE_DISTANCES=1,2,3,4` on the 3k prompt, 512
+    tokens, 64 slots: 79.7, 72.8, 68.6, and 64.9 percent at one to four
+    layers. Warm test: commit `0358b9f`, 2026-08-06, 16 slots, 40.4 to 45.5 ms
+    per token. Cold test: `overnight-20260906-022111`, rows p1 and p3, 64
+    slots: off 22.67 and 22.62 tokens per second, one layer 22.55 and 21.95,
+    two layers 21.66 and 19.06, bytes read per token 110, 151, and 162 MB; the
+    session under prefetch 1,046.3 seconds against 984.6 without.
 
-[^25]: oMLX commit messages for Lightning MTP and the fused gate and up
-    projection on Qwen3.6-35B-A3B, greedy, single stream, M3 Ultra: 85.2 to
-    140.4 tokens per second with the multi-token-prediction head, and 104.4
-    to 115.6 with the fused projection; both are the authors' own
-    measurements. Its Qwen prefill floor stays at 2048 tokens on M5, its
-    group-128 native quantized matmul is disabled there, and it carries a
-    workaround for an M5 gather kernel, per its source at `origin/main` on
-    2026-09-03.
+[^25]: Fence and spin: commit `0c3358f`, 2026-08-01, 26.8 to 22.8 tokens per
+    second. Shared events: `bench-results/probes-20260905/evprobe*.swift`,
+    medians over 300 trials, commit-and-wait 197 microseconds, a satisfied GPU
+    wait 1 microsecond, a parked GPU restarting in 100 to 190. Merged command
+    buffers: commit `4249aa3`, 2026-08-04.
+
+[^26]: `docs/REVIEW-2026-09-04.md`, the policy tables: on the session at 64
+    slots, LRFU with decay 0.03 per plan 72.1 misses per token, the windowed
+    TinyLFU shape 72.8, S3-FIFO 73.2, SIEVE 74.5, ARC 75.5, least recently
+    used 77.2, aging 71.8, the offline optimum 39.1. The transition predictor
+    gained 2 percent at 16 slots, 5 at 64, and 10 at 128, for a 256-by-256
+    count table per layer.
+
+[^27]: Commit `f62015b`: two interleaved pairs at the 3k prompt, 64 slots, 512
+    tokens, file cache warm; unstaged 25.86 and 25.32 tokens per second,
+    staged 25.32 and 25.95. The switch is `TURBO_FIELDFARE_MOE_STAGE=1`. The
+    fork is [NVMAI](https://github.com/Pummelchen/NVMAI).
+
+[^28]: `--rdadvise` in `docs/RUNTIME_CONTROLS.md`: off, default, bounded, and
+    adaptive; the three advice variants measured neutral or negative on this
+    host and are kept for experiments.

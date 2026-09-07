@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif" role="img" aria-label="Time to first token by prompt length">
+<rect width="760" height="470" fill="#ffffff"/>
+<text x="20.0" y="26.0" font-size="16" text-anchor="start" font-weight="bold" fill="#1a1a1a">Time to first token by prompt length</text>
+<text x="20.0" y="46.0" font-size="12" text-anchor="start" font-weight="normal" fill="#444444">Seconds from request to first token, log scale, one fresh process per point on a base M5 with 24 GB.</text>
+<text x="20.0" y="64.0" font-size="12" text-anchor="start" font-weight="normal" fill="#444444">slipstream measured 2026-09-06; TurboFieldfare and llama.cpp 2026-08-06, same prompts and harness.</text>
+<line x1="64" y1="414.0" x2="540" y2="414.0" stroke="#e3e3e3"/>
+<text x="56.0" y="418.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">1</text>
+<line x1="64" y1="363.4" x2="540" y2="363.4" stroke="#e3e3e3"/>
+<text x="56.0" y="367.4" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">3</text>
+<line x1="64" y1="308.0" x2="540" y2="308.0" stroke="#e3e3e3"/>
+<text x="56.0" y="312.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">10</text>
+<line x1="64" y1="257.4" x2="540" y2="257.4" stroke="#e3e3e3"/>
+<text x="56.0" y="261.4" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">30</text>
+<line x1="64" y1="202.0" x2="540" y2="202.0" stroke="#e3e3e3"/>
+<text x="56.0" y="206.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">100</text>
+<line x1="64" y1="151.4" x2="540" y2="151.4" stroke="#e3e3e3"/>
+<text x="56.0" y="155.4" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">300</text>
+<line x1="64" y1="96.0" x2="540" y2="96.0" stroke="#e3e3e3"/>
+<text x="56.0" y="100.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">1,000</text>
+<line x1="64" y1="96" x2="64" y2="414" stroke="#888888"/>
+<line x1="64" y1="414" x2="540" y2="414" stroke="#888888"/>
+<text x="92.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">1k</text>
+<text x="232.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">3k</text>
+<text x="372.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">12k</text>
+<text x="512.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">24k</text>
+<text x="302.0" y="456.0" font-size="12" text-anchor="middle" font-weight="normal" fill="#1a1a1a">prompt length, tokens</text>
+<text x="18.0" y="255.0" font-size="12" text-anchor="middle" font-weight="normal" fill="#1a1a1a" transform="rotate(-90 18 255.0)">time to first token, seconds, log scale</text>
+<path d="M92.0,313.4 L232.0,291.5 L372.0,230.6 L512.0,196.8" fill="none" stroke="#0072B2" stroke-width="2"/>
+<circle cx="92.0" cy="313.4" r="4" fill="#0072B2"/>
+<circle cx="232.0" cy="291.5" r="4" fill="#0072B2"/>
+<circle cx="372.0" cy="230.6" r="4" fill="#0072B2"/>
+<circle cx="512.0" cy="196.8" r="4" fill="#0072B2"/>
+<path d="M92.0,313.9 L232.0,292.2 L372.0,230.9 L512.0,196.9" fill="none" stroke="#0072B2" stroke-width="2" stroke-dasharray="6 4"/>
+<circle cx="92.0" cy="313.9" r="4" fill="#0072B2"/>
+<circle cx="232.0" cy="292.2" r="4" fill="#0072B2"/>
+<circle cx="372.0" cy="230.9" r="4" fill="#0072B2"/>
+<circle cx="512.0" cy="196.9" r="4" fill="#0072B2"/>
+<path d="M92.0,291.5 L232.0,241.4 L372.0,173.7 L512.0,114.8" fill="none" stroke="#D55E00" stroke-width="2"/>
+<rect x="88.5" y="288.0" width="7" height="7" fill="#D55E00"/>
+<rect x="228.5" y="237.9" width="7" height="7" fill="#D55E00"/>
+<rect x="368.5" y="170.2" width="7" height="7" fill="#D55E00"/>
+<rect x="508.5" y="111.3" width="7" height="7" fill="#D55E00"/>
+<path d="M92.0,405.6 L232.0,352.5 L372.0,279.7 L512.0,238.9" fill="none" stroke="#009E73" stroke-width="2"/>
+<polygon points="92.0,401.1 87.5,409.1 96.5,409.1" fill="#009E73"/>
+<polygon points="232.0,348.0 227.5,356.0 236.5,356.0" fill="#009E73"/>
+<polygon points="372.0,275.2 367.5,283.2 376.5,283.2" fill="#009E73"/>
+<polygon points="512.0,234.4 507.5,242.4 516.5,242.4" fill="#009E73"/>
+<path d="M92.0,366.6 L232.0,303.6 L372.0,232.6 L512.0,185.9" fill="none" stroke="#009E73" stroke-width="2" stroke-dasharray="6 4"/>
+<polygon points="92.0,362.1 87.5,370.1 96.5,370.1" fill="#009E73"/>
+<polygon points="232.0,299.1 227.5,307.1 236.5,307.1" fill="#009E73"/>
+<polygon points="372.0,228.1 367.5,236.1 376.5,236.1" fill="#009E73"/>
+<polygon points="512.0,181.4 507.5,189.4 516.5,189.4" fill="#009E73"/>
+<line x1="546" y1="114.8" x2="554" y2="114.8" stroke="#D55E00" stroke-width="1"/>
+<text x="558.0" y="118.8" font-size="12" text-anchor="start" font-weight="normal" fill="#D55E00">TurboFieldfare, 16 slots, 2.0 GB</text>
+<line x1="546" y1="238.9" x2="554" y2="238.9" stroke="#009E73" stroke-width="1"/>
+<text x="558.0" y="242.9" font-size="12" text-anchor="start" font-weight="normal" fill="#009E73">llama.cpp, all in memory, 16.2 GB</text>
+<line x1="546" y1="185.9" x2="554" y2="185.9" stroke="#009E73" stroke-width="1"/>
+<text x="558.0" y="189.9" font-size="12" text-anchor="start" font-weight="normal" fill="#009E73">llama.cpp, CPU experts, 17.2 GB</text>
+<line x1="546" y1="196.9" x2="554" y2="201.9" stroke="#0072B2" stroke-width="1"/>
+<text x="558.0" y="205.9" font-size="12" text-anchor="start" font-weight="normal" fill="#0072B2">slipstream, 16 or 64 slots</text>
+</svg>

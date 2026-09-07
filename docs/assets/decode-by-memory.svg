@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif" role="img" aria-label="Decode speed against memory at the 2,940-token prompt">
+<rect width="760" height="470" fill="#ffffff"/>
+<text x="20.0" y="26.0" font-size="16" text-anchor="start" font-weight="bold" fill="#1a1a1a">Decode speed against memory at the 2,940-token prompt</text>
+<text x="20.0" y="46.0" font-size="12" text-anchor="start" font-weight="normal" fill="#444444">Tokens per second over 512 generated tokens, against the process's peak physical footprint.</text>
+<text x="20.0" y="64.0" font-size="12" text-anchor="start" font-weight="normal" fill="#444444">The two llama.cpp points that leave mmap on report resident set size instead. Base M5, 24 GB.</text>
+<line x1="64" y1="414.0" x2="730" y2="414.0" stroke="#e3e3e3"/>
+<text x="56.0" y="418.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">0</text>
+<line x1="64" y1="343.3" x2="730" y2="343.3" stroke="#e3e3e3"/>
+<text x="56.0" y="347.3" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">10</text>
+<line x1="64" y1="272.7" x2="730" y2="272.7" stroke="#e3e3e3"/>
+<text x="56.0" y="276.7" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">20</text>
+<line x1="64" y1="202.0" x2="730" y2="202.0" stroke="#e3e3e3"/>
+<text x="56.0" y="206.0" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">30</text>
+<line x1="64" y1="131.3" x2="730" y2="131.3" stroke="#e3e3e3"/>
+<text x="56.0" y="135.3" font-size="11" text-anchor="end" font-weight="normal" fill="#444444">40</text>
+<text x="64.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">0</text>
+<text x="175.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">4</text>
+<text x="286.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">8</text>
+<text x="397.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">12</text>
+<text x="508.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">16</text>
+<text x="619.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">20</text>
+<text x="730.0" y="432.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#444444">24</text>
+<line x1="64" y1="96" x2="64" y2="414" stroke="#888888"/>
+<line x1="64" y1="414" x2="730" y2="414" stroke="#888888"/>
+<text x="397.0" y="456.0" font-size="12" text-anchor="middle" font-weight="normal" fill="#1a1a1a">peak memory footprint, GB, on a machine with 24 GB</text>
+<text x="18.0" y="255.0" font-size="12" text-anchor="middle" font-weight="normal" fill="#1a1a1a" transform="rotate(-90 18 255.0)">decode, tokens per second</text>
+<line x1="655.1" y1="130" x2="655.1" y2="414" stroke="#6b6b6b" stroke-dasharray="4 4"/>
+<text x="649.1" y="406.0" font-size="11" text-anchor="end" font-weight="normal" fill="#6b6b6b">GPU wired limit, 21.3 GB</text>
+<path d="M132.0,222.5 L161.7,208.4 L220.5,194.2 L279.9,190.0 L339.3,188.6 L457.5,235.9" fill="none" stroke="#0072B2" stroke-width="2"/>
+<circle cx="132.0" cy="222.5" r="4" fill="#0072B2"/>
+<text x="132.0" y="213.5" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">16</text>
+<circle cx="161.7" cy="208.4" r="4" fill="#0072B2"/>
+<text x="161.7" y="199.4" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">32</text>
+<circle cx="220.5" cy="194.2" r="4" fill="#0072B2"/>
+<text x="220.5" y="185.2" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">64</text>
+<circle cx="279.9" cy="190.0" r="4" fill="#0072B2"/>
+<text x="279.9" y="181.0" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">96</text>
+<circle cx="339.3" cy="188.6" r="4" fill="#0072B2"/>
+<text x="339.3" y="179.6" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">128</text>
+<circle cx="457.5" cy="235.9" r="4" fill="#0072B2"/>
+<text x="457.5" y="226.9" font-size="11" text-anchor="middle" font-weight="normal" fill="#0072B2">192</text>
+<path d="M118.4,245.8 L147.8,235.2" fill="none" stroke="#D55E00" stroke-width="2"/>
+<rect x="114.9" y="242.3" width="7" height="7" fill="#D55E00"/>
+<text x="118.4" y="262.8" font-size="11" text-anchor="middle" font-weight="normal" fill="#D55E00">16</text>
+<rect x="144.3" y="231.7" width="7" height="7" fill="#D55E00"/>
+<text x="147.8" y="252.2" font-size="11" text-anchor="middle" font-weight="normal" fill="#D55E00">32</text>
+<text x="147.2" y="156.1" font-size="12" text-anchor="start" font-weight="normal" fill="#0072B2">slipstream, 16 to 192 slots</text>
+<text x="100.1" y="293.9" font-size="12" text-anchor="start" font-weight="normal" fill="#D55E00">TurboFieldfare, 16 and 32 slots</text>
+<polygon points="514.1,136.7 509.6,144.7 518.6,144.7" fill="#009E73"/>
+<text x="504.1" y="157.2" font-size="12" text-anchor="end" font-weight="normal" fill="#009E73">llama.cpp, all weights in memory</text>
+<polygon points="530.2,247.7 525.7,255.7 534.7,255.7" fill="#009E73"/>
+<text x="520.2" y="250.2" font-size="12" text-anchor="end" font-weight="normal" fill="#009E73">llama.cpp, --n-cpu-moe 32</text>
+<polygon points="541.9,262.5 537.4,270.5 546.4,270.5" fill="#009E73"/>
+<text x="531.9" y="281.0" font-size="12" text-anchor="end" font-weight="normal" fill="#009E73">the same with --mmap 0</text>
+<polygon points="663.4,117.9 668.4,122.9 663.4,127.9 658.4,122.9" fill="#CC79A7"/>
+<text x="653.4" y="116.9" font-size="12" text-anchor="end" font-weight="normal" fill="#CC79A7">mlx-lm, all weights in memory</text>
+</svg>
